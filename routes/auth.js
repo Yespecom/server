@@ -23,7 +23,8 @@ router.use((req, res, next) => {
   if (req.method === "POST" && req.body) {
     console.log(`📦 Request Body:`, {
       ...req.body,
-      password: req.body.password ? "[HIDDEN]" : undefined,
+      password: req.body.password, // TEMPORARY: For debugging only!
+      passwordType: typeof req.body.password, // Add type check for debugging
     })
   }
 

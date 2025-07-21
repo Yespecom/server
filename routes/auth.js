@@ -1,12 +1,15 @@
 const express = require("express")
 const jwt = require("jsonwebtoken")
 const bcrypt = require("bcryptjs")
-const User = require("../models/User")
+const { getMainDb } = require("../db/connection") // Updated import
 const PendingRegistration = require("../models/PendingRegistration")
 const { getTenantDB } = require("../config/tenantDB")
 const router = express.Router()
 const OTP = require("../models/OTP")
 const { sendWelcomeEmail, sendOTPEmail } = require("../config/email")
+
+// Import User model as a function that takes a connection
+const UserModel = require("../models/User")
 
 // Add request logging middleware
 router.use((req, res, next) => {
@@ -14,17 +17,16 @@ router.use((req, res, next) => {
   console.log(`🔍 Host: ${req.get("host")}`)
   console.log(`🔍 Headers:`, {
     host: req.get("host"),
-    authorization: req.get("authorization") || "None",
+    authorization: req.get("authorization") ? "Bearer ***" : "None",
     "content-type": req.get("content-type"),
     "user-agent": req.get("user-agent"),
   })
 
-  // Log request body for POST requests
+  // Log request body for POST requests (password hidden for security)
   if (req.method === "POST" && req.body) {
     console.log(`📦 Request Body:`, {
       ...req.body,
-      password: req.body.password, // TEMPORARY: For debugging only!
-      passwordType: typeof req.body.password, // Add type check for debugging
+      password: req.body.password ? "[HIDDEN]" : undefined,
     })
   }
 
@@ -37,6 +39,8 @@ const generateStoreId = async () => {
   let isUnique = false
   while (!isUnique) {
     storeId = Math.random().toString(36).substring(2, 8).toUpperCase()
+    const mainConnection = getMainDb()
+    const User = UserModel(mainConnection)
     const existingUser = await User.findOne({ storeId: storeId })
     if (!existingUser) {
       isUnique = true
@@ -85,6 +89,8 @@ router.post("/register/initiate", async (req, res) => {
     }
 
     // Check if user already exists in main DB
+    const mainConnection = getMainDb()
+    const User = UserModel(mainConnection)
     const existingUser = await User.findOne({ email })
     if (existingUser) {
       return res.status(400).json({ error: "User already exists with this email" })
@@ -162,6 +168,8 @@ router.post("/register/complete", async (req, res) => {
     }
 
     // Check if user already exists in main DB (double check to prevent race conditions)
+    const mainConnection = getMainDb()
+    const User = UserModel(mainConnection)
     const existingUser = await User.findOne({ email })
     if (existingUser) {
       // Clean up pending registration if user already exists
@@ -302,25 +310,29 @@ router.post("/login", async (req, res) => {
 
     console.log(`🔍 Looking for user: ${email}`)
 
+    // Get main connection and User model
+    const mainConnection = getMainDb()
+    const User = UserModel(mainConnection)
+
     // Find user in main DB for auth
-    const mainUser = await User.findOne({ email: email.toLowerCase().trim() })
-    if (!mainUser) {
+    const user = await User.findOne({ email: email.toLowerCase().trim() })
+    if (!user) {
       console.log(`❌ User not found in main DB: ${email}`)
-      return res.status(400).json({ error: "Invalid credentials" })
+      return res.status(401).json({ error: "Invalid credentials" })
     }
 
-    console.log(`✅ Found main user: ${email}, tenantId: ${mainUser.tenantId}`)
+    console.log(`✅ Found main user: ${email}, tenantId: ${user.tenantId}`)
 
     // Use direct bcrypt comparison for reliability
     try {
       console.log(`🔍 Comparing password for user: ${email}`)
 
-      const isMatch = await bcrypt.compare(password, mainUser.password)
+      const isMatch = await bcrypt.compare(password, user.password)
       console.log(`🔑 Password comparison result: ${isMatch}`)
 
       if (!isMatch) {
         console.log(`❌ Password mismatch for user: ${email}`)
-        return res.status(400).json({ error: "Invalid credentials" })
+        return res.status(401).json({ error: "Invalid credentials" })
       }
     } catch (passwordError) {
       console.error(`❌ Password comparison error:`, passwordError)
@@ -331,8 +343,8 @@ router.post("/login", async (req, res) => {
 
     // Get tenant DB and user data
     try {
-      const tenantDB = await getTenantDB(mainUser.tenantId)
-      console.log(`✅ Connected to tenant DB: ${mainUser.tenantId}`)
+      const tenantDB = await getTenantDB(user.tenantId)
+      console.log(`✅ Connected to tenant DB: ${user.tenantId}`)
 
       const TenantUser = require("../models/tenant/User")(tenantDB)
       const tenantUser = await TenantUser.findOne({ email: email.toLowerCase().trim() })
@@ -348,7 +360,7 @@ router.post("/login", async (req, res) => {
       const token = jwt.sign(
         {
           userId: tenantUser._id,
-          tenantId: mainUser.tenantId,
+          tenantId: user.tenantId,
           email: email,
         },
         process.env.JWT_SECRET || "your-secret-key",
@@ -360,8 +372,8 @@ router.post("/login", async (req, res) => {
       // Prepare response
       const response = {
         token,
-        tenantId: mainUser.tenantId,
-        storeId: mainUser.storeId || null,
+        tenantId: user.tenantId,
+        storeId: user.storeId || null,
         hasStore: tenantUser.hasStore || false,
         user: {
           name: tenantUser.name,
@@ -375,7 +387,7 @@ router.post("/login", async (req, res) => {
 
       res.json(response)
     } catch (tenantError) {
-      console.error(`❌ Tenant DB error for ${mainUser.tenantId}:`, tenantError)
+      console.error(`❌ Tenant DB error for ${user.tenantId}:`, tenantError)
       return res.status(500).json({ error: "Failed to access user data" })
     }
   } catch (error) {
@@ -396,6 +408,8 @@ router.post("/login-otp", async (req, res) => {
     }
 
     // Find user in main DB
+    const mainConnection = getMainDb()
+    const User = UserModel(mainConnection)
     const mainUser = await User.findOne({ email })
     if (!mainUser) {
       return res.status(400).json({ error: "User not found" })
@@ -450,6 +464,8 @@ router.post("/setup-store", async (req, res) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET || "your-secret-key")
 
     // Get main user for tenant lookup
+    const mainConnection = getMainDb()
+    const User = UserModel(mainConnection)
     const mainUser = await User.findOne({ email: decoded.email })
     if (!mainUser) {
       return res.status(404).json({ error: "User not found" })
@@ -532,6 +548,8 @@ router.get("/user/status", async (req, res) => {
     console.log("✅ Token decoded:", { email: decoded.email, tenantId: decoded.tenantId })
 
     // Get main user for tenant lookup
+    const mainConnection = getMainDb()
+    const User = UserModel(mainConnection)
     const mainUser = await User.findOne({ email: decoded.email })
     if (!mainUser) {
       console.log("❌ Main user not found")

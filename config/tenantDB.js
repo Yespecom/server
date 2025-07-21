@@ -20,7 +20,7 @@ const getTenantDB = async (tenantId) => {
       useNewUrlParser: true,
       useUnifiedTopology: true,
       maxPoolSize: 10,
-      serverSelectionTimeoutMS: 30000, // Increased to 30 seconds
+      serverSelectionTimeoutMS: 60000, // Increased to 60 seconds
       socketTimeoutMS: 60000, // Set to 60 seconds
     })
 

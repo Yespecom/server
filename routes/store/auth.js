@@ -1,33 +1,53 @@
 const express = require("express")
 const jwt = require("jsonwebtoken")
 const bcrypt = require("bcryptjs")
-const rateLimit = require("express-rate-limit")
-const router = express.Router({ mergeParams: true })
+const User = require("../models/User")
+const PendingRegistration = require("../models/PendingRegistration")
+const { getTenantDB } = require("../config/tenantDB")
+const router = express.Router()
+const OTP = require("../models/OTP")
+const { sendWelcomeEmail, sendOTPEmail } = require("../config/email")
 
-// Rate limiting for authentication endpoints
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 10, // limit each IP to 10 requests per windowMs
-  message: {
-    error: "Too many authentication attempts, please try again later.",
-    retryAfter: "15 minutes",
-  },
-  standardHeaders: true,
-  legacyHeaders: false,
-})
-
-// Apply rate limiting to sensitive endpoints
-router.use(["/login", "/register", "/forgot-password"], authLimiter)
-
-// Enhanced logging middleware
+// Add request logging middleware
 router.use((req, res, next) => {
-  console.log(`🔐 Store Auth: ${req.method} ${req.path}`)
-  console.log(`🔐 Store ID: ${req.storeId}`)
-  console.log(`🔐 Tenant ID: ${req.tenantId}`)
-  console.log(`🔐 User Agent: ${req.get("user-agent")}`)
-  console.log(`🔐 IP: ${req.ip}`)
+  console.log(`📍 AUTH ROUTE: ${req.method} ${req.path}`)
+  console.log(`🔍 Host: ${req.get("host")}`)
+  console.log(`🔍 Headers:`, {
+    host: req.get("host"),
+    authorization: req.get("authorization") || "None",
+    "content-type": req.get("content-type"),
+    "user-agent": req.get("user-agent"),
+  })
+
+  // Log request body for POST requests
+  if (req.method === "POST" && req.body) {
+    console.log(`📦 Request Body:`, {
+      ...req.body,
+      password: req.body.password ? "[HIDDEN]" : undefined,
+    })
+  }
+
   next()
 })
+
+// Helper function to generate 6-digit unique store ID
+const generateStoreId = async () => {
+  let storeId
+  let isUnique = false
+  while (!isUnique) {
+    storeId = Math.random().toString(36).substring(2, 8).toUpperCase()
+    const existingUser = await User.findOne({ storeId: storeId })
+    if (!existingUser) {
+      isUnique = true
+    }
+  }
+  return storeId
+}
+
+// Helper function to generate tenant ID
+const generateTenantId = () => {
+  return `tenant_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`
+}
 
 // Validate email format
 const validateEmail = (email) => {
@@ -35,1057 +55,525 @@ const validateEmail = (email) => {
   return emailRegex.test(email)
 }
 
-// Validate phone format (international)
-const validatePhone = (phone) => {
-  const phoneRegex = /^\+?[1-9]\d{1,14}$/
-  return phoneRegex.test(phone.replace(/\s+/g, ""))
-}
-
-// Generate secure JWT token
-const generateToken = (payload, expiresIn = "30d") => {
-  const jwtSecret = process.env.JWT_SECRET || "your-secret-key"
-  if (jwtSecret === "your-secret-key") {
-    console.warn("⚠️ Using default JWT secret - please set JWT_SECRET environment variable")
-  }
-
-  return jwt.sign(payload, jwtSecret, { expiresIn })
-}
-
-// Verify JWT token
-const verifyToken = (token) => {
-  const jwtSecret = process.env.JWT_SECRET || "your-secret-key"
-  return jwt.verify(token, jwtSecret)
-}
-
-// Enhanced debug endpoint with password testing
-router.get("/debug", async (req, res) => {
+// Step 1: Initiate Registration (Send OTP)
+router.post("/register/initiate", async (req, res) => {
   try {
-    const debugInfo = {
-      storeId: req.storeId,
-      tenantId: req.tenantId,
-      hasTenantDB: !!req.tenantDB,
-      dbState: req.tenantDB?.readyState,
-      dbName: req.tenantDB?.name,
-      storeInfo: req.storeInfo,
-      host: req.get("host"),
-      userAgent: req.get("user-agent"),
-      ip: req.ip,
-      timestamp: new Date().toISOString(),
-      jwtSecret: !!process.env.JWT_SECRET,
-      nodeEnv: process.env.NODE_ENV,
-    }
+    const { name, email, phone, password } = req.body
+    console.log(`📝 Initiate registration request for: ${email}`)
 
-    // Add customer debug info if models are available
-    if (req.models) {
-      const { Customer } = req.models
-
-      try {
-        const customerCount = await Customer.countDocuments()
-        const customers = await Customer.find({}).select("name email phone isActive createdAt").limit(5)
-
-        debugInfo.customerInfo = {
-          totalCustomers: customerCount,
-          sampleCustomers: customers,
-        }
-
-        // Test specific customer if jane@example.com exists
-        const janeCustomer = await Customer.findOne({ email: "jane@example.com" })
-        if (janeCustomer) {
-          debugInfo.janeCustomer = {
-            id: janeCustomer._id,
-            name: janeCustomer.name,
-            email: janeCustomer.email,
-            phone: janeCustomer.phone,
-            hasPassword: !!janeCustomer.password,
-            passwordLength: janeCustomer.password ? janeCustomer.password.length : 0,
-            isActive: janeCustomer.isActive,
-            createdAt: janeCustomer.createdAt,
-          }
-
-          // Test password comparison
-          if (janeCustomer.password) {
-            const testPasswords = ["password123", "Password123", "password", "123456"]
-            debugInfo.passwordTests = {}
-
-            for (const testPassword of testPasswords) {
-              try {
-                const isMatch = await bcrypt.compare(testPassword, janeCustomer.password)
-                debugInfo.passwordTests[testPassword] = isMatch
-              } catch (error) {
-                debugInfo.passwordTests[testPassword] = `Error: ${error.message}`
-              }
-            }
-          }
-        }
-      } catch (dbError) {
-        debugInfo.customerError = dbError.message
-      }
-    }
-
-    console.log("🔍 Store auth debug info compiled successfully")
-    res.json(debugInfo)
-  } catch (error) {
-    console.error("❌ Debug endpoint error:", error)
-    res.status(500).json({
-      error: "Debug endpoint failed",
-      details: error.message,
-    })
-  }
-})
-
-// Debug endpoint to fix customer password
-router.post("/debug/fix-password", async (req, res) => {
-  try {
-    const { email, newPassword } = req.body
-
-    if (!email || !newPassword) {
-      return res.status(400).json({ error: "Email and new password are required" })
-    }
-
-    if (!req.models) {
-      return res.status(500).json({ error: "Database models not initialized" })
-    }
-
-    const { Customer } = req.models
-    const customer = await Customer.findOne({ email: email.toLowerCase() })
-
-    if (!customer) {
-      return res.status(404).json({ error: "Customer not found" })
-    }
-
-    // Hash the new password
-    const hashedPassword = await bcrypt.hash(newPassword, 12)
-
-    console.log(`🔧 Fixing password for ${email}`)
-    console.log(`🔧 Old password hash: ${customer.password}`)
-    console.log(`🔧 New password hash: ${hashedPassword}`)
-
-    // Update the password
-    customer.password = hashedPassword
-    await customer.save()
-
-    // Test the new password
-    const testResult = await bcrypt.compare(newPassword, hashedPassword)
-
-    res.json({
-      message: "Password updated successfully",
-      customer: {
-        id: customer._id,
-        email: customer.email,
-        name: customer.name,
-      },
-      passwordTest: testResult,
-      newPasswordHash: hashedPassword,
-    })
-  } catch (error) {
-    console.error("❌ Fix password error:", error)
-    res.status(500).json({
-      error: "Failed to fix password",
-      details: error.message,
-    })
-  }
-})
-
-// Enhanced customer registration
-router.post("/register", async (req, res) => {
-  try {
-    const { name, email, password, phone, acceptTerms } = req.body
-
-    console.log(`📝 Customer registration for store: ${req.storeId}, email: ${email}`)
-
-    // Enhanced validation
-    const errors = []
-
-    if (!name || name.trim().length < 2) {
-      errors.push("Name must be at least 2 characters long")
-    }
-
-    if (!email || !validateEmail(email)) {
-      errors.push("Valid email address is required")
-    }
-
-    if (!password || password.length < 6) {
-      errors.push("Password must be at least 6 characters long")
-    }
-
-    if (phone && !validatePhone(phone)) {
-      errors.push("Valid phone number is required")
-    }
-
-    if (errors.length > 0) {
+    // Validate required fields
+    if (!name || !email || !password) {
       return res.status(400).json({
-        error: "Validation failed",
-        details: errors,
+        error: "Name, email, and password are required",
       })
     }
 
-    if (!req.models) {
-      console.error("❌ Models not initialized")
-      return res.status(500).json({ error: "Database models not initialized" })
-    }
-
-    const { Customer } = req.models
-
-    // Check for existing customer
-    const existingCustomer = await Customer.findOne({
-      $or: [{ email: email.toLowerCase() }, ...(phone ? [{ phone: phone }] : [])],
-    })
-
-    if (existingCustomer) {
-      if (!existingCustomer.password) {
-        return res.status(400).json({
-          error: "An account with this email/phone exists but needs migration",
-          code: "ACCOUNT_NEEDS_MIGRATION",
-          canMigrate: true,
-          migrationData: {
-            email: existingCustomer.email,
-            phone: existingCustomer.phone,
-            name: existingCustomer.name,
-          },
-        })
-      }
-
-      return res.status(400).json({
-        error: "An account with this email or phone already exists",
-        canLogin: true,
-      })
-    }
-
-    // Hash password
-    const hashedPassword = await bcrypt.hash(password, 12)
-    console.log(`🔐 Hashing password for ${email}: ${password} -> ${hashedPassword}`)
-
-    // Create new customer
-    const customer = new Customer({
-      name: name.trim(),
-      email: email.toLowerCase(),
-      password: hashedPassword,
-      phone: phone || "",
-      totalSpent: 0,
-      orderCount: 0,
-      isActive: true,
-      preferences: {
-        notifications: true,
-        marketing: false,
-      },
-    })
-
-    await customer.save()
-    console.log(`👤 New customer registered: ${email}`)
-
-    // Generate JWT token
-    const token = generateToken({
-      customerId: customer._id,
-      email: customer.email,
-      storeId: req.storeId,
-      tenantId: req.tenantId,
-      type: "customer",
-    })
-
-    const response = {
-      message: "Registration successful",
-      token,
-      customer: {
-        id: customer._id,
-        name: customer.name,
-        email: customer.email,
-        phone: customer.phone,
-        totalSpent: customer.totalSpent,
-        orderCount: customer.orderCount,
-      },
-      storeId: req.storeId,
-      tenantId: req.tenantId,
-    }
-
-    console.log("✅ Customer registration successful")
-    res.status(201).json(response)
-  } catch (error) {
-    console.error("❌ Customer registration error:", error)
-    res.status(500).json({
-      error: "Failed to register customer",
-      details: error.message,
-    })
-  }
-})
-
-// Enhanced customer login with detailed debugging
-router.post("/login", async (req, res) => {
-  try {
-    const { email, password, rememberMe } = req.body
-
-    console.log(`🔐 Customer login attempt for store: ${req.storeId}`)
-    console.log(`🔐 Email: ${email}`)
-    console.log(`🔐 Password provided: ${!!password}`)
-    console.log(`🔐 Password length: ${password ? password.length : 0}`)
-
-    // Validation
-    if (!email || !password) {
-      console.log("❌ Missing credentials")
-      return res.status(400).json({
-        error: "Email and password are required",
-        code: "MISSING_CREDENTIALS",
-      })
-    }
-
-    if (!validateEmail(email)) {
-      console.log("❌ Invalid email format")
-      return res.status(400).json({
-        error: "Please enter a valid email address",
-        code: "INVALID_EMAIL",
-      })
-    }
-
-    if (!req.models) {
-      console.error("❌ Models not initialized")
-      return res.status(500).json({ error: "Database models not initialized" })
-    }
-
-    const { Customer } = req.models
-
-    // Find customer
-    console.log(`🔍 Looking for customer with email: ${email.toLowerCase()}`)
-    const customer = await Customer.findOne({ email: email.toLowerCase() })
-
-    if (!customer) {
-      console.log("❌ Customer not found in database")
-      return res.status(401).json({
-        error: "Invalid email or password",
-        code: "INVALID_CREDENTIALS",
-        canRegister: true,
-      })
-    }
-
-    console.log(`✅ Customer found:`)
-    console.log(`   - ID: ${customer._id}`)
-    console.log(`   - Name: ${customer.name}`)
-    console.log(`   - Email: ${customer.email}`)
-    console.log(`   - Has Password: ${!!customer.password}`)
-    console.log(
-      `   - Stored Password Hash (first 20 chars): ${customer.password ? customer.password.substring(0, 20) + "..." : "None"}`,
-    )
-    console.log(`   - Is Active: ${customer.isActive}`)
-
-    // Check if account needs migration
-    if (!customer.password) {
-      console.log("❌ Customer has no password - needs migration")
-      return res.status(400).json({
-        error: "Your account needs to be migrated to use password login",
-        code: "NO_PASSWORD_SET",
-        canMigrate: true,
-        migrationData: {
-          email: customer.email,
-          phone: customer.phone,
-          name: customer.name,
-        },
-      })
-    }
-
-    // Verify password with detailed logging
-    console.log(`🔐 Comparing password...`)
-    console.log(`   - Input password (first 5 chars): "${password.substring(0, 5)}..."`)
-    console.log(`   - Stored hash: ${customer.password}`)
-
-    const isPasswordValid = await bcrypt.compare(password, customer.password)
-    console.log(`🔐 Password comparison result: ${isPasswordValid}`)
-
-    if (!isPasswordValid) {
-      console.log("❌ Password comparison failed")
-
-      // Test with common passwords for debugging
-      const testPasswords = ["password123", "Password123", "password", "123456", "test123"]
-      console.log("🧪 Testing common passwords:")
-
-      for (const testPwd of testPasswords) {
-        const testResult = await bcrypt.compare(testPwd, customer.password)
-        console.log(`   - "${testPwd}": ${testResult}`)
-        if (testResult) {
-          console.log(`✅ Found matching password: "${testPwd}"`)
-          break
-        }
-      }
-
-      return res.status(401).json({
-        error: "Invalid email or password",
-        code: "INVALID_CREDENTIALS",
-        canResetPassword: true,
-        debug:
-          process.env.NODE_ENV === "development"
-            ? {
-                providedPassword: password,
-                hashExists: !!customer.password,
-                hashLength: customer.password ? customer.password.length : 0,
-              }
-            : undefined,
-      })
-    }
-
-    // Check if account is active
-    if (!customer.isActive) {
-      console.log("❌ Customer account is inactive")
-      return res.status(401).json({
-        error: "Account is deactivated. Please contact support.",
-        code: "ACCOUNT_DEACTIVATED",
-      })
-    }
-
-    console.log(`✅ Customer login successful: ${email}`)
-
-    // Generate JWT token with appropriate expiration
-    const expiresIn = rememberMe ? "90d" : "30d"
-    const token = generateToken(
-      {
-        customerId: customer._id,
-        email: customer.email,
-        storeId: req.storeId,
-        tenantId: req.tenantId,
-        type: "customer",
-      },
-      expiresIn,
-    )
-
-    // Update last login
-    customer.lastLoginAt = new Date()
-    await customer.save()
-
-    const response = {
-      message: "Login successful",
-      token,
-      customer: {
-        id: customer._id,
-        name: customer.name,
-        email: customer.email,
-        phone: customer.phone,
-        totalSpent: customer.totalSpent,
-        orderCount: customer.orderCount,
-        lastOrderDate: customer.lastOrderDate,
-        addresses: customer.addresses || [],
-      },
-      storeId: req.storeId,
-      tenantId: req.tenantId,
-      expiresIn,
-    }
-
-    console.log("✅ Login response prepared successfully")
-    res.json(response)
-  } catch (error) {
-    console.error("❌ Customer login error:", error)
-    res.status(500).json({
-      error: "Failed to login",
-      details: error.message,
-    })
-  }
-})
-
-// Phone-based login (for backward compatibility)
-router.post("/login-phone", async (req, res) => {
-  try {
-    const { phone, otp } = req.body
-
-    console.log(`📱 Phone login for store: ${req.storeId}, phone: ${phone}`)
-
-    if (!phone || !otp) {
-      return res.status(400).json({
-        error: "Phone number and OTP are required",
-        code: "MISSING_CREDENTIALS",
-      })
-    }
-
-    // This would integrate with your OTP verification system
-    // For now, we'll return a migration message
-    return res.status(400).json({
-      error: "Phone-based login is deprecated. Please migrate your account to use email and password.",
-      code: "DEPRECATED_LOGIN_METHOD",
-      canMigrate: true,
-      migrationEndpoint: `/api/${req.storeId}/auth/migrate-account`,
-    })
-  } catch (error) {
-    console.error("❌ Phone login error:", error)
-    res.status(500).json({
-      error: "Failed to login with phone",
-      details: error.message,
-    })
-  }
-})
-
-// Enhanced account migration
-router.post("/migrate-account", async (req, res) => {
-  try {
-    const { email, phone, password, name } = req.body
-
-    console.log(`🔄 Account migration for store: ${req.storeId}`)
-
-    // Validation
-    if (!password || password.length < 6) {
-      return res.status(400).json({
-        error: "Password must be at least 6 characters long for migration",
-      })
-    }
-
-    if (!email && !phone) {
-      return res.status(400).json({
-        error: "Either email or phone is required for migration",
-      })
-    }
-
-    if (email && !validateEmail(email)) {
-      return res.status(400).json({ error: "Valid email address is required" })
-    }
-
-    if (phone && !validatePhone(phone)) {
-      return res.status(400).json({ error: "Valid phone number is required" })
-    }
-
-    if (!req.models) {
-      return res.status(500).json({ error: "Database models not initialized" })
-    }
-
-    const { Customer } = req.models
-
-    // Find existing customer
-    let customer = null
-    if (email) {
-      customer = await Customer.findOne({ email: email.toLowerCase() })
-    } else if (phone) {
-      customer = await Customer.findOne({ phone: phone })
-    }
-
-    if (!customer) {
-      return res.status(404).json({
-        error: "No existing account found with the provided email or phone number",
-        canRegister: true,
-      })
-    }
-
-    // Check if already migrated
-    if (customer.password) {
-      return res.status(400).json({
-        error: "Account already has password authentication set up",
-        canLogin: true,
-      })
-    }
-
-    // Hash the new password
-    const hashedPassword = await bcrypt.hash(password, 12)
-
-    // Update customer
-    customer.password = hashedPassword
-    if (email && !customer.email) {
-      customer.email = email.toLowerCase()
-    }
-    if (name && name.trim()) {
-      customer.name = name.trim()
-    }
-    customer.migratedAt = new Date()
-
-    await customer.save()
-    console.log(`🔄 Account migrated successfully: ${customer.email || customer.phone}`)
-
-    // Generate JWT token
-    const token = generateToken({
-      customerId: customer._id,
-      email: customer.email,
-      storeId: req.storeId,
-      tenantId: req.tenantId,
-      type: "customer",
-    })
-
-    const response = {
-      message: "Account migrated successfully. You can now use email and password to login.",
-      token,
-      customer: {
-        id: customer._id,
-        name: customer.name,
-        email: customer.email,
-        phone: customer.phone,
-        totalSpent: customer.totalSpent,
-        orderCount: customer.orderCount,
-        lastOrderDate: customer.lastOrderDate,
-      },
-      storeId: req.storeId,
-      tenantId: req.tenantId,
-    }
-
-    res.json(response)
-  } catch (error) {
-    console.error("❌ Customer migration error:", error)
-    res.status(500).json({
-      error: "Failed to migrate account",
-      details: error.message,
-    })
-  }
-})
-
-// Forgot password
-router.post("/forgot-password", async (req, res) => {
-  try {
-    const { email } = req.body
-
-    if (!email || !validateEmail(email)) {
-      return res.status(400).json({ error: "Valid email address is required" })
-    }
-
-    if (!req.models) {
-      return res.status(500).json({ error: "Database models not initialized" })
-    }
-
-    const { Customer } = req.models
-    const customer = await Customer.findOne({ email: email.toLowerCase() })
-
-    if (!customer) {
-      // Don't reveal if email exists or not for security
-      return res.json({
-        message: "If an account with this email exists, a password reset link has been sent.",
-      })
-    }
-
-    // Generate reset token
-    const resetToken = jwt.sign(
-      { customerId: customer._id, email: customer.email, type: "password_reset" },
-      process.env.JWT_SECRET || "your-secret-key",
-      { expiresIn: "1h" },
-    )
-
-    // In a real app, you'd send this via email
-    // For now, we'll just log it
-    console.log(`🔐 Password reset token for ${email}: ${resetToken}`)
-
-    // Store reset token (you might want to save this in database)
-    customer.passwordResetToken = resetToken
-    customer.passwordResetExpires = new Date(Date.now() + 3600000) // 1 hour
-    await customer.save()
-
-    res.json({
-      message: "Password reset instructions have been sent to your email.",
-      // In development, include the token
-      ...(process.env.NODE_ENV === "development" && { resetToken }),
-    })
-  } catch (error) {
-    console.error("❌ Forgot password error:", error)
-    res.status(500).json({
-      error: "Failed to process password reset request",
-      details: error.message,
-    })
-  }
-})
-
-// Reset password
-router.post("/reset-password", async (req, res) => {
-  try {
-    const { token, newPassword } = req.body
-
-    if (!token || !newPassword) {
-      return res.status(400).json({ error: "Reset token and new password are required" })
-    }
-
-    if (newPassword.length < 6) {
-      return res.status(400).json({ error: "Password must be at least 6 characters long" })
-    }
-
-    // Verify reset token
-    let decoded
-    try {
-      decoded = verifyToken(token)
-    } catch (error) {
-      return res.status(400).json({ error: "Invalid or expired reset token" })
-    }
-
-    if (decoded.type !== "password_reset") {
-      return res.status(400).json({ error: "Invalid reset token" })
-    }
-
-    if (!req.models) {
-      return res.status(500).json({ error: "Database models not initialized" })
-    }
-
-    const { Customer } = req.models
-    const customer = await Customer.findById(decoded.customerId)
-
-    if (!customer) {
-      return res.status(404).json({ error: "Customer not found" })
-    }
-
-    // Check if token is still valid
-    if (customer.passwordResetExpires && customer.passwordResetExpires < new Date()) {
-      return res.status(400).json({ error: "Reset token has expired" })
-    }
-
-    // Hash new password
-    const hashedPassword = await bcrypt.hash(newPassword, 12)
-    customer.password = hashedPassword
-    customer.passwordResetToken = undefined
-    customer.passwordResetExpires = undefined
-    customer.passwordChangedAt = new Date()
-
-    await customer.save()
-
-    console.log(`🔐 Password reset successful for: ${customer.email}`)
-
-    res.json({
-      message: "Password reset successful. You can now login with your new password.",
-    })
-  } catch (error) {
-    console.error("❌ Reset password error:", error)
-    res.status(500).json({
-      error: "Failed to reset password",
-      details: error.message,
-    })
-  }
-})
-
-// Customer authentication middleware
-const authenticateCustomer = async (req, res, next) => {
-  try {
-    const token = req.header("Authorization")?.replace("Bearer ", "")
-
-    if (!token) {
-      return res.status(401).json({
-        error: "Access denied. Please login.",
-        code: "NO_TOKEN",
-      })
-    }
-
-    const decoded = verifyToken(token)
-
-    if (decoded.type !== "customer") {
-      return res.status(401).json({
-        error: "Invalid token type",
-        code: "INVALID_TOKEN_TYPE",
-      })
-    }
-
-    // Verify store context
-    if (decoded.storeId !== req.storeId) {
-      return res.status(401).json({
-        error: "Access denied. Token is not valid for this store.",
-        code: "INVALID_STORE_CONTEXT",
-      })
-    }
-
-    if (!req.models) {
-      return res.status(500).json({ error: "Database models not initialized" })
-    }
-
-    const { Customer } = req.models
-    const customer = await Customer.findById(decoded.customerId)
-
-    if (!customer) {
-      return res.status(401).json({
-        error: "Customer not found",
-        code: "CUSTOMER_NOT_FOUND",
-      })
-    }
-
-    if (!customer.isActive) {
-      return res.status(401).json({
-        error: "Account is deactivated",
-        code: "ACCOUNT_DEACTIVATED",
-      })
-    }
-
-    req.customer = customer
-    req.customerId = customer._id
-    next()
-  } catch (error) {
-    console.error("❌ Customer auth middleware error:", error)
-    if (error.name === "JsonWebTokenError" || error.name === "TokenExpiredError") {
-      return res.status(401).json({
-        error: "Invalid or expired token",
-        code: "TOKEN_INVALID",
-      })
-    }
-    res.status(500).json({ error: "Authentication failed" })
-  }
-}
-
-// Get customer profile
-router.get("/profile", authenticateCustomer, async (req, res) => {
-  try {
-    const customer = req.customer
-
-    res.json({
-      customer: {
-        id: customer._id,
-        name: customer.name,
-        email: customer.email,
-        phone: customer.phone,
-        totalSpent: customer.totalSpent,
-        orderCount: customer.orderCount,
-        lastOrderDate: customer.lastOrderDate,
-        addresses: customer.addresses || [],
-        preferences: customer.preferences || {},
-        createdAt: customer.createdAt,
-        lastLoginAt: customer.lastLoginAt,
-      },
-    })
-  } catch (error) {
-    console.error("❌ Get profile error:", error)
-    res.status(500).json({
-      error: "Failed to get profile",
-      details: error.message,
-    })
-  }
-})
-
-// Update customer profile
-router.put("/profile", authenticateCustomer, async (req, res) => {
-  try {
-    const { name, phone, preferences } = req.body
-    const customer = req.customer
-
-    // Validation
-    if (name && name.trim().length < 2) {
+    // Validate name
+    if (name.trim().length < 2) {
       return res.status(400).json({ error: "Name must be at least 2 characters long" })
     }
 
-    if (phone && !validatePhone(phone)) {
-      return res.status(400).json({ error: "Valid phone number is required" })
+    // Validate email format
+    if (!validateEmail(email)) {
+      return res.status(400).json({ error: "Please enter a valid email address" })
     }
 
-    // Update fields
-    if (name) customer.name = name.trim()
-    if (phone) customer.phone = phone
-    if (preferences) customer.preferences = { ...customer.preferences, ...preferences }
+    // Validate password
+    if (password.length < 6) {
+      return res.status(400).json({ error: "Password must be at least 6 characters long" })
+    }
 
-    await customer.save()
+    // Check if user already exists in main DB
+    const existingUser = await User.findOne({ email })
+    if (existingUser) {
+      return res.status(400).json({ error: "User already exists with this email" })
+    }
+
+    // Check if there's a pending registration for this email
+    const existingPending = await PendingRegistration.findOne({ email })
+    if (existingPending) {
+      // If a pending registration exists and is not expired, resend OTP
+      if (existingPending.expiresAt > new Date()) {
+        const otp = await OTP.createOTP(email, "registration")
+        await sendOTPEmail(email, otp, "registration")
+        console.log(`🔄 Resent OTP for existing pending registration: ${email}`)
+        return res.json({
+          message: "An active registration attempt exists. New OTP sent to your email.",
+          email,
+          expiresIn: "10 minutes",
+        })
+      } else {
+        // If expired, delete and create new
+        await PendingRegistration.deleteOne({ email })
+        await OTP.deleteMany({ email, purpose: "registration" })
+        console.log(`🗑️ Cleaned up expired pending registration for: ${email}`)
+      }
+    }
+
+    // Create or update pending registration
+    const pendingRegistration = new PendingRegistration({
+      name,
+      email,
+      phone: phone || "",
+      password, // Password will be hashed by pre-save middleware
+    })
+    await pendingRegistration.save()
+    console.log(`⏳ Pending registration created for: ${email}`)
+
+    // Generate and send OTP
+    const otp = await OTP.createOTP(email, "registration")
+    await sendOTPEmail(email, otp, "registration")
+    console.log(`🔢 Generated and sent OTP for ${email}: ${otp}`)
 
     res.json({
-      message: "Profile updated successfully",
-      customer: {
-        id: customer._id,
-        name: customer.name,
-        email: customer.email,
-        phone: customer.phone,
-        preferences: customer.preferences,
+      message: "OTP sent successfully to your email. Please verify to complete registration.",
+      email,
+      expiresIn: "10 minutes",
+    })
+  } catch (error) {
+    console.error("❌ Initiate registration error:", error)
+    res.status(500).json({ error: error.message })
+  }
+})
+
+// Step 2: Complete Registration (Verify OTP and Create User)
+router.post("/register/complete", async (req, res) => {
+  try {
+    const { email, otp } = req.body
+    console.log(`✅ Complete registration request for: ${email}`)
+
+    if (!email || !otp) {
+      return res.status(400).json({ error: "Email and OTP are required" })
+    }
+
+    // Verify OTP
+    const otpVerification = await OTP.verifyOTP(email, otp, "registration")
+    if (!otpVerification.success) {
+      return res.status(400).json({ error: otpVerification.message })
+    }
+
+    // Retrieve pending registration details
+    const pendingRegistration = await PendingRegistration.findOne({ email })
+    if (!pendingRegistration) {
+      return res.status(400).json({
+        error: "No pending registration found or it has expired. Please initiate registration again.",
+      })
+    }
+
+    // Check if user already exists in main DB (double check to prevent race conditions)
+    const existingUser = await User.findOne({ email })
+    if (existingUser) {
+      // Clean up pending registration if user already exists
+      await PendingRegistration.deleteOne({ email })
+      return res.status(400).json({ error: "User already exists with this email" })
+    }
+
+    const { name, phone, password: hashedPassword } = pendingRegistration // Get hashed password
+
+    // Generate tenant ID
+    const tenantId = generateTenantId()
+    console.log(`🏗️ Creating tenant: ${tenantId} for user: ${email}`)
+
+    try {
+      // Create tenant database connection
+      const tenantDB = await getTenantDB(tenantId)
+      console.log(`✅ Tenant DB created: ${tenantId}`)
+
+      // Initialize all tenant models
+      const TenantUser = require("../models/tenant/User")(tenantDB)
+      const Product = require("../models/tenant/Product")(tenantDB)
+      const Order = require("../models/tenant/Order")(tenantDB)
+      const Category = require("../models/tenant/Category")(tenantDB)
+      const Customer = require("../models/tenant/Customer")(tenantDB)
+      const Offer = require("../models/tenant/Offer")(tenantDB)
+      const Payment = require("../models/tenant/Payment")(tenantDB)
+      const Settings = require("../models/tenant/Settings")(tenantDB)
+      console.log(`📋 Models initialized for tenant: ${tenantId}`)
+
+      // Create user in tenant DB with full data
+      const tenantUser = new TenantUser({
+        name,
+        email,
+        phone,
+        password: hashedPassword, // Use the already hashed password
+        role: "owner",
+        hasStore: false,
+      })
+      await tenantUser.save()
+      console.log(`👤 Tenant user created: ${email}`)
+
+      // Create user in main DB for authentication lookup
+      const mainUser = new User({
+        email,
+        password: hashedPassword, // Use the already hashed password
+        tenantId,
+      })
+      await mainUser.save()
+      console.log(`🔑 Main user created for auth: ${email}`)
+
+      // Create default settings
+      const defaultSettings = new Settings({
+        general: {
+          storeName: "",
+          logo: "",
+          banner: "",
+          tagline: "Welcome to our store",
+          supportEmail: email,
+          supportPhone: phone,
+        },
+        payment: {
+          codEnabled: true,
+        },
+        social: {
+          instagram: "",
+          whatsapp: phone,
+          facebook: "",
+        },
+        shipping: {
+          deliveryTime: "2-3 business days",
+          charges: 50,
+          freeShippingAbove: 500,
+        },
+      })
+      await defaultSettings.save()
+      console.log(`⚙️ Default settings created for tenant: ${tenantId}`)
+
+      // Create default category
+      const defaultCategory = new Category({
+        name: "General",
+        description: "General products category",
+        isActive: true,
+      })
+      await defaultCategory.save()
+      console.log(`🗂️ Default category created for tenant: ${tenantId}`)
+
+      // Send welcome email
+      try {
+        await sendWelcomeEmail(email, name)
+      } catch (emailError) {
+        console.error("❌ Welcome email failed:", emailError)
+        // Don't fail registration if email fails
+      }
+
+      // Delete the pending registration record
+      await PendingRegistration.deleteOne({ email })
+      console.log(`🗑️ Pending registration deleted for: ${email}`)
+
+      // Generate JWT with tenant info
+      const token = jwt.sign(
+        {
+          userId: tenantUser._id,
+          tenantId: tenantId,
+          email: email,
+        },
+        process.env.JWT_SECRET || "your-secret-key",
+        { expiresIn: "7d" },
+      )
+
+      res.status(201).json({
+        message: "User registered successfully",
+        token,
+        tenantId,
+        status: "no_store",
+      })
+    } catch (dbError) {
+      console.error(`❌ Tenant setup error for ${tenantId}:`, dbError)
+      throw new Error(`Failed to setup tenant: ${dbError.message}`)
+    }
+  } catch (error) {
+    console.error("❌ Complete registration error:", error)
+    res.status(500).json({ error: error.message })
+  }
+})
+
+// Login Route
+router.post("/login", async (req, res) => {
+  try {
+    console.log("🔐 Login attempt started")
+
+    const { email, password } = req.body
+
+    // Validate input
+    if (!email || !password) {
+      console.log("❌ Missing email or password")
+      return res.status(400).json({ error: "Email and password are required" })
+    }
+
+    console.log(`🔍 Looking for user: ${email}`)
+
+    // Find user in main DB for auth
+    const mainUser = await User.findOne({ email: email.toLowerCase().trim() })
+    if (!mainUser) {
+      console.log(`❌ User not found in main DB: ${email}`)
+      return res.status(400).json({ error: "Invalid credentials" })
+    }
+
+    console.log(`✅ Found main user: ${email}, tenantId: ${mainUser.tenantId}`)
+
+    // Use direct bcrypt comparison for reliability
+    try {
+      console.log(`🔍 Comparing password for user: ${email}`)
+
+      const isMatch = await bcrypt.compare(password, mainUser.password)
+      console.log(`🔑 Password comparison result: ${isMatch}`)
+
+      if (!isMatch) {
+        console.log(`❌ Password mismatch for user: ${email}`)
+        return res.status(400).json({ error: "Invalid credentials" })
+      }
+    } catch (passwordError) {
+      console.error(`❌ Password comparison error:`, passwordError)
+      return res.status(500).json({ error: "Authentication error" })
+    }
+
+    console.log(`✅ Password verified for user: ${email}`)
+
+    // Get tenant DB and user data
+    try {
+      const tenantDB = await getTenantDB(mainUser.tenantId)
+      console.log(`✅ Connected to tenant DB: ${mainUser.tenantId}`)
+
+      const TenantUser = require("../models/tenant/User")(tenantDB)
+      const tenantUser = await TenantUser.findOne({ email: email.toLowerCase().trim() })
+
+      if (!tenantUser) {
+        console.log(`❌ Tenant user not found: ${email}`)
+        return res.status(400).json({ error: "User data not found" })
+      }
+
+      console.log(`✅ Found tenant user: ${email}`)
+
+      // Generate JWT
+      const token = jwt.sign(
+        {
+          userId: tenantUser._id,
+          tenantId: mainUser.tenantId,
+          email: email,
+        },
+        process.env.JWT_SECRET || "your-secret-key",
+        { expiresIn: "7d" },
+      )
+
+      console.log(`✅ JWT generated for user: ${email}`)
+
+      // Prepare response
+      const response = {
+        token,
+        tenantId: mainUser.tenantId,
+        storeId: mainUser.storeId || null,
+        hasStore: tenantUser.hasStore || false,
+        user: {
+          name: tenantUser.name,
+          email: tenantUser.email,
+          phone: tenantUser.phone || "",
+          role: tenantUser.role,
+        },
+      }
+
+      console.log(`✅ Login successful for: ${email}`)
+
+      res.json(response)
+    } catch (tenantError) {
+      console.error(`❌ Tenant DB error for ${mainUser.tenantId}:`, tenantError)
+      return res.status(500).json({ error: "Failed to access user data" })
+    }
+  } catch (error) {
+    console.error("❌ Login error:", error)
+    res.status(500).json({ error: "Internal server error" })
+  }
+})
+
+// Login with OTP (optional secure login)
+router.post("/login-otp", async (req, res) => {
+  try {
+    const { email, otp } = req.body
+
+    // Verify OTP
+    const otpVerification = await OTP.verifyOTP(email, otp, "login")
+    if (!otpVerification.success) {
+      return res.status(400).json({ error: otpVerification.message })
+    }
+
+    // Find user in main DB
+    const mainUser = await User.findOne({ email })
+    if (!mainUser) {
+      return res.status(400).json({ error: "User not found" })
+    }
+
+    // Get tenant DB and user data
+    const tenantDB = await getTenantDB(mainUser.tenantId)
+    const TenantUser = require("../models/tenant/User")(tenantDB)
+    const tenantUser = await TenantUser.findOne({ email })
+
+    if (!tenantUser) {
+      return res.status(400).json({ error: "User data not found" })
+    }
+
+    // Generate JWT
+    const token = jwt.sign(
+      {
+        userId: tenantUser._id,
+        tenantId: mainUser.tenantId,
+        email: email,
+      },
+      process.env.JWT_SECRET || "your-secret-key",
+      { expiresIn: "7d" },
+    )
+
+    res.json({
+      token,
+      tenantId: mainUser.tenantId,
+      storeId: mainUser.storeId || null,
+      hasStore: tenantUser.hasStore,
+      user: {
+        name: tenantUser.name,
+        email: tenantUser.email,
+        phone: tenantUser.phone,
+        role: tenantUser.role,
       },
     })
   } catch (error) {
-    console.error("❌ Update profile error:", error)
-    res.status(500).json({
-      error: "Failed to update profile",
-      details: error.message,
-    })
+    console.error("❌ OTP Login error:", error)
+    res.status(500).json({ error: error.message })
   }
 })
 
-// Change password
-router.put("/change-password", authenticateCustomer, async (req, res) => {
+// Setup Store
+router.post("/setup-store", async (req, res) => {
   try {
-    const { currentPassword, newPassword } = req.body
-    const customer = req.customer
-
-    if (!currentPassword || !newPassword) {
-      return res.status(400).json({ error: "Current password and new password are required" })
+    const token = req.header("Authorization")?.replace("Bearer ", "")
+    if (!token) {
+      return res.status(401).json({ error: "Access denied" })
     }
 
-    if (newPassword.length < 6) {
-      return res.status(400).json({ error: "New password must be at least 6 characters long" })
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || "your-secret-key")
+
+    // Get main user for tenant lookup
+    const mainUser = await User.findOne({ email: decoded.email })
+    if (!mainUser) {
+      return res.status(404).json({ error: "User not found" })
     }
 
-    // Verify current password
-    const isCurrentPasswordValid = await bcrypt.compare(currentPassword, customer.password)
-    if (!isCurrentPasswordValid) {
-      return res.status(401).json({ error: "Current password is incorrect" })
+    // Get tenant user
+    const tenantDB = await getTenantDB(mainUser.tenantId)
+    const TenantUser = require("../models/tenant/User")(tenantDB)
+    const tenantUser = await TenantUser.findById(decoded.userId)
+
+    if (!tenantUser) {
+      return res.status(404).json({ error: "Tenant user not found" })
     }
 
-    // Hash new password
-    const hashedNewPassword = await bcrypt.hash(newPassword, 12)
-    customer.password = hashedNewPassword
-    customer.passwordChangedAt = new Date()
-    await customer.save()
+    if (tenantUser.hasStore) {
+      return res.status(400).json({ error: "Store already exists for this user" })
+    }
 
-    console.log(`🔐 Password changed for customer: ${customer.email}`)
+    const { storeName, logo, banner, industry } = req.body
+
+    // Generate unique 6-digit store ID
+    const storeId = await generateStoreId()
+    console.log(`🏪 Setting up store with ID: ${storeId} for tenant: ${mainUser.tenantId}`)
+
+    // Update tenant user with store info
+    tenantUser.hasStore = true
+    tenantUser.storeInfo = {
+      name: storeName,
+      logo: logo || "",
+      banner: banner || "",
+      storeId: storeId,
+      industry: industry || "General",
+      isActive: true,
+    }
+    await tenantUser.save()
+
+    // Update main user with store ID
+    mainUser.storeId = storeId
+    await mainUser.save()
+
+    // Update settings with store info
+    const Settings = require("../models/tenant/Settings")(tenantDB)
+    const settings = await Settings.findOne()
+    if (settings) {
+      settings.general.storeName = storeName
+      settings.general.logo = logo || ""
+      settings.general.banner = banner || ""
+      await settings.save()
+    }
+
+    console.log(`✅ Store setup completed for: ${storeName} (${storeId})`)
+
+    // Dynamically construct the base URL from the request
+    const baseUrl = `${req.protocol}://${req.get("host")}`
 
     res.json({
-      message: "Password changed successfully",
+      message: "Store setup completed successfully",
+      tenantId: mainUser.tenantId,
+      storeId,
+      storeUrl: `${baseUrl}/api/${storeId.toLowerCase()}`,
+      adminUrl: `${baseUrl}/api/admin`,
     })
   } catch (error) {
-    console.error("❌ Change password error:", error)
-    res.status(500).json({
-      error: "Failed to change password",
-      details: error.message,
-    })
+    console.error("❌ Store setup error:", error)
+    res.status(500).json({ error: error.message })
   }
 })
 
-// Verify token
-router.get("/verify-token", authenticateCustomer, async (req, res) => {
+// Get user status - MOVED TO CORRECT LOCATION
+router.get("/user/status", async (req, res) => {
   try {
-    const customer = req.customer
+    const token = req.header("Authorization")?.replace("Bearer ", "")
+    if (!token) {
+      return res.status(401).json({ error: "Access denied. No token provided." })
+    }
+
+    console.log("🔍 Getting user status...")
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || "your-secret-key")
+    console.log("✅ Token decoded:", { email: decoded.email, tenantId: decoded.tenantId })
+
+    // Get main user for tenant lookup
+    const mainUser = await User.findOne({ email: decoded.email })
+    if (!mainUser) {
+      console.log("❌ Main user not found")
+      return res.status(404).json({ error: "User not found" })
+    }
+
+    console.log("✅ Main user found:", { tenantId: mainUser.tenantId, storeId: mainUser.storeId })
+
+    // Get tenant user data
+    const tenantDB = await getTenantDB(mainUser.tenantId)
+    const TenantUser = require("../models/tenant/User")(tenantDB)
+    const tenantUser = await TenantUser.findById(decoded.userId).select("-password")
+
+    if (!tenantUser) {
+      console.log("❌ Tenant user not found")
+      return res.status(404).json({ error: "Tenant user not found" })
+    }
+
+    console.log("✅ Tenant user found:", { hasStore: tenantUser.hasStore })
 
     res.json({
-      valid: true,
-      customer: {
-        id: customer._id,
-        name: customer.name,
-        email: customer.email,
-        phone: customer.phone,
-        totalSpent: customer.totalSpent,
-        orderCount: customer.orderCount,
+      user: {
+        id: tenantUser._id,
+        name: tenantUser.name,
+        email: tenantUser.email,
+        phone: tenantUser.phone,
+        role: tenantUser.role,
+        hasStore: tenantUser.hasStore,
+        storeInfo: tenantUser.storeInfo || null,
       },
+      hasStore: tenantUser.hasStore,
+      tenantId: mainUser.tenantId,
+      storeId: mainUser.storeId || null,
     })
   } catch (error) {
-    console.error("❌ Token verification error:", error)
-    res.status(500).json({
-      error: "Token verification failed",
-      details: error.message,
-    })
-  }
-})
-
-// Logout (client-side token invalidation)
-router.post("/logout", authenticateCustomer, async (req, res) => {
-  try {
-    // In a more sophisticated setup, you might maintain a blacklist of tokens
-    // For now, we'll just return success and let the client handle token removal
-
-    res.json({
-      message: "Logged out successfully",
-      action: "Please remove the token from your client storage",
-    })
-  } catch (error) {
-    console.error("❌ Logout error:", error)
-    res.status(500).json({
-      error: "Failed to logout",
-      details: error.message,
-    })
-  }
-})
-
-// Address management endpoints (keeping existing functionality)
-router.get("/addresses", authenticateCustomer, async (req, res) => {
-  try {
-    const customer = req.customer
-    res.json({
-      addresses: customer.addresses || [],
-      count: customer.addresses ? customer.addresses.length : 0,
-    })
-  } catch (error) {
-    console.error("❌ Get addresses error:", error)
-    res.status(500).json({
-      error: "Failed to get addresses",
-      details: error.message,
-    })
-  }
-})
-
-router.post("/addresses", authenticateCustomer, async (req, res) => {
-  try {
-    const { type, name, street, landmark, city, state, pincode, country, isDefault } = req.body
-    const customer = req.customer
-
-    // Validation
-    if (!name || !street || !city || !state || !pincode) {
-      return res.status(400).json({
-        error: "Name, street, city, state, and pincode are required",
-      })
+    console.error("❌ User status error:", error)
+    if (error.name === "JsonWebTokenError") {
+      return res.status(401).json({ error: "Invalid token" })
     }
-
-    if (!/^\d{6}$/.test(pincode)) {
-      return res.status(400).json({ error: "Pincode must be 6 digits" })
+    if (error.name === "TokenExpiredError") {
+      return res.status(401).json({ error: "Token expired" })
     }
-
-    const addressData = {
-      type: type || "home",
-      name: name.trim(),
-      street: street.trim(),
-      landmark: landmark ? landmark.trim() : "",
-      city: city.trim(),
-      state: state.trim(),
-      pincode: pincode.trim(),
-      country: country || "India",
-      isDefault: isDefault || false,
-    }
-
-    await customer.addAddress(addressData)
-    const newAddress = customer.addresses[customer.addresses.length - 1]
-
-    res.status(201).json({
-      message: "Address added successfully",
-      address: newAddress,
-      count: customer.addresses.length,
-    })
-  } catch (error) {
-    console.error("❌ Add address error:", error)
-    res.status(500).json({
-      error: "Failed to add address",
-      details: error.message,
-    })
-  }
-})
-
-router.put("/addresses/:addressId", authenticateCustomer, async (req, res) => {
-  try {
-    const { addressId } = req.params
-    const { type, name, street, landmark, city, state, pincode, country, isDefault } = req.body
-    const customer = req.customer
-
-    if (!name || !street || !city || !state || !pincode) {
-      return res.status(400).json({
-        error: "Name, street, city, state, and pincode are required",
-      })
-    }
-
-    if (!/^\d{6}$/.test(pincode)) {
-      return res.status(400).json({ error: "Pincode must be 6 digits" })
-    }
-
-    const updateData = {
-      type: type || "home",
-      name: name.trim(),
-      street: street.trim(),
-      landmark: landmark ? landmark.trim() : "",
-      city: city.trim(),
-      state: state.trim(),
-      pincode: pincode.trim(),
-      country: country || "India",
-      isDefault: isDefault || false,
-    }
-
-    const result = await customer.updateAddress(addressId, updateData)
-    if (!result) {
-      return res.status(404).json({ error: "Address not found" })
-    }
-
-    const updatedAddress = customer.addresses.id(addressId)
-    res.json({
-      message: "Address updated successfully",
-      address: updatedAddress,
-    })
-  } catch (error) {
-    console.error("❌ Update address error:", error)
-    res.status(500).json({
-      error: "Failed to update address",
-      details: error.message,
-    })
-  }
-})
-
-router.delete("/addresses/:addressId", authenticateCustomer, async (req, res) => {
-  try {
-    const { addressId } = req.params
-    const customer = req.customer
-
-    if (customer.addresses.length <= 1) {
-      return res.status(400).json({
-        error: "Cannot delete the only address. Please add another address first.",
-      })
-    }
-
-    const result = await customer.removeAddress(addressId)
-    if (!result) {
-      return res.status(404).json({ error: "Address not found" })
-    }
-
-    res.json({
-      message: "Address deleted successfully",
-      count: customer.addresses.length,
-    })
-  } catch (error) {
-    console.error("❌ Delete address error:", error)
-    res.status(500).json({
-      error: "Failed to delete address",
-      details: error.message,
-    })
+    res.status(500).json({ error: error.message })
   }
 })
 

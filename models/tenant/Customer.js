@@ -4,6 +4,14 @@ const bcrypt = require("bcryptjs")
 const customerSchema = new mongoose.Schema(
   {
     tenantId: { type: String, required: true }, // New field for tenantId
+    firstName: {
+      type: String,
+      trim: true,
+    },
+    lastName: {
+      type: String,
+      trim: true,
+    },
     name: {
       type: String,
       required: true,
@@ -19,10 +27,11 @@ const customerSchema = new mongoose.Schema(
       type: String,
       required: false, // Made optional
       unique: true, // Ensure unique phone per tenant
+      trim: true,
     },
     password: {
       type: String,
-      required: false, // Optional for backward compatibility
+      required: true, // Required for password
       minlength: 6,
     },
     firebaseUid: {
@@ -54,7 +63,7 @@ const customerSchema = new mongoose.Schema(
           type: String,
           required: true,
         },
-        pincode: {
+        zip: {
           type: String,
           required: true,
         },
@@ -90,6 +99,9 @@ const customerSchema = new mongoose.Schema(
       default: 0,
     },
     lastOrderDate: Date,
+    lastLogin: {
+      type: Date,
+    },
     preferences: {
       notifications: {
         type: Boolean,

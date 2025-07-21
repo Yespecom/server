@@ -1,241 +1,123 @@
 const express = require("express")
-const router = express.Router({ mergeParams: true }) // Enable mergeParams to access :storeId
+const router = express.Router()
 
-// Import all store routes
-const authRoutes = require("./store/auth")
-const ordersRoutes = require("./store/orders")
-const paymentsRoutes = require("./store/payments")
+// Import individual store route modules
+const storeAuthRouter = require("./store/auth")
+const storeOrdersRouter = require("./store/orders")
+const storePaymentsRouter = require("./store/payments")
 
-// Import the new store context middleware
-const storeContextMiddleware = require("../middleware/storeContext")
-
-// Apply the store context middleware to all routes in this router
-router.use(storeContextMiddleware)
-
-// Middleware to check if store exists
+// Middleware to ensure tenantDB is available for all store routes
 router.use((req, res, next) => {
-  console.log(`🛍️ Store middleware - checking store context:`, {
-    hasStoreId: !!req.storeId,
-    hasTenantDB: !!req.tenantDB,
-    storeId: req.storeId,
-    tenantId: req.tenantId,
-    path: req.path,
-    method: req.method,
-  })
-
-  if (!req.tenantDB || !req.storeId) {
-    console.error(`❌ Store not found - missing context:`, {
-      hasStoreId: !!req.storeId,
-      hasTenantDB: !!req.tenantDB,
-      storeId: req.storeId,
-      tenantId: req.tenantId,
-      host: req.get("host"),
-      path: req.path,
-    })
-    return res.status(404).json({ error: "Store not found" })
+  if (!req.tenantDB) {
+    console.error("❌ Store Router: Tenant database connection not established for store route.")
+    return res.status(500).json({ error: "Store not configured or database connection failed." })
   }
   next()
 })
 
-// Middleware to ensure all tenant models are loaded for this database connection
-router.use(async (req, res, next) => {
-  try {
-    if (req.tenantDB && !req.models) {
-      // Only initialize if not already done
-      console.log(`🔧 Initializing models for tenant: ${req.tenantId}`)
+// Mount individual routers
+router.use("/auth", storeAuthRouter)
+router.use("/orders", storeOrdersRouter)
+router.use("/payments", storePaymentsRouter)
 
-      // Initialize all required models for the tenant database
-      const Product = require("../models/tenant/Product")(req.tenantDB)
-      const Category = require("../models/tenant/Category")(req.tenantDB)
-      const Offer = require("../models/tenant/Offer")(req.tenantDB)
-      const Customer = require("../models/tenant/Customer")(req.tenantDB)
-      const Order = require("../models/tenant/Order")(req.tenantDB)
-      const Settings = require("../models/tenant/Settings")(req.tenantDB)
-      const Payment = require("../models/tenant/Payment")(req.tenantDB)
-
-      // Store the models in the request object for easy access
-      req.models = {
-        Product,
-        Category,
-        Offer,
-        Customer,
-        Order,
-        Settings,
-        Payment,
-      }
-
-      console.log(`✅ All models initialized for tenant: ${req.tenantId}`)
-    }
-    next()
-  } catch (error) {
-    console.error("❌ Error initializing tenant models in store router:", error)
-    return res.status(500).json({
-      error: "Failed to initialize database models",
-      details: error.message,
-    })
-  }
-})
-
-// Add debugging middleware specifically for orders
-router.use("/orders", (req, res, next) => {
-  console.log(`📦 Orders route accessed:`, {
-    method: req.method,
-    path: req.path,
-    fullPath: req.originalUrl,
-    hasModels: !!req.models,
-    hasAuth: !!req.get("authorization"),
-    body: req.method === "POST" ? req.body : "N/A",
+// Example store root route
+router.get("/", (req, res) => {
+  res.json({
+    message: `Welcome to the Storefront API for store ID: ${req.storeId}`,
+    storeInfo: req.storeInfo, // Information loaded by storeContextMiddleware
   })
-  next()
 })
 
-// Mount auth routes
-router.use("/auth", authRoutes)
-
-// Mount orders routes
-router.use("/orders", ordersRoutes)
-
-// Mount payments routes
-router.use("/payments", paymentsRoutes)
-
-// Example store root route (e.g., for fetching general store info)
-router.get("/", async (req, res) => {
-  try {
-    const Settings = req.models.Settings
-    const storeSettings = await Settings.findOne({ tenantId: req.tenantId })
-    if (!storeSettings) {
-      return res.status(404).json({ error: "Store not found or settings not configured." })
-    }
-    res.json({
-      message: `Welcome to ${storeSettings.storeName}!`,
-      storeInfo: {
-        name: storeSettings.storeName,
-        logo: storeSettings.logoUrl,
-        contactEmail: storeSettings.contactEmail,
-        currency: storeSettings.currency,
-        // ... other public settings
-      },
-    })
-  } catch (error) {
-    console.error("❌ Error fetching store info:", error)
-    res.status(500).json({ error: "Failed to fetch store information" })
-  }
-})
-
-// Get all products for the store (publicly accessible)
-router.get("/products", async (req, res) => {
-  try {
-    const Product = req.models.Product
-    const products = await Product.find({ tenantId: req.tenantId, isActive: true }).populate("category")
-    res.json(products)
-  } catch (error) {
-    console.error("❌ Error fetching store products:", error)
-    res.status(500).json({ error: "Failed to fetch products" })
-  }
-})
-
-// Get a single product by ID for the store (publicly accessible)
-router.get("/products/:id", async (req, res) => {
-  try {
-    const Product = req.models.Product
-    const product = await Product.findOne({ _id: req.params.id, tenantId: req.tenantId, isActive: true }).populate(
-      "category",
-    )
-    if (!product) {
-      return res.status(404).json({ error: "Product not found" })
-    }
-    res.json(product)
-  } catch (error) {
-    console.error("❌ Error fetching single store product:", error)
-    res.status(500).json({ error: "Failed to fetch product" })
-  }
-})
-
-// Get all categories for the store (publicly accessible)
-router.get("/categories", async (req, res) => {
-  try {
-    const Category = req.models.Category
-    const categories = await Category.find({ tenantId: req.tenantId, isActive: true })
-    res.json(categories)
-  } catch (error) {
-    console.error("❌ Error fetching store categories:", error)
-    res.status(500).json({ error: "Failed to fetch categories" })
-  }
-})
-
-// Get a single category by ID for the store (publicly accessible)
-router.get("/categories/:id", async (req, res) => {
-  try {
-    const Category = req.models.Category
-    const category = await Category.findOne({ _id: req.params.id, tenantId: req.tenantId, isActive: true })
-    if (!category) {
-      return res.status(404).json({ error: "Category not found" })
-    }
-    res.json(category)
-  } catch (error) {
-    console.error("❌ Error fetching single store category:", error)
-    res.status(500).json({ error: "Failed to fetch category" })
-  }
-})
-
-// Get store settings (public info)
+// Get store settings (publicly accessible)
+const Settings = require("../models/tenant/Settings")
 router.get("/settings", async (req, res) => {
   try {
-    const { Settings } = req.models
-    const settings = await Settings.findOne()
-
-    res.json({
-      storeId: req.storeId,
-      storeInfo: req.storeInfo,
-      general: settings?.general || {},
-      social: settings?.social || {},
-      shipping: settings?.shipping || {},
-      payment: {
-        codEnabled: settings?.payment?.codEnabled || true,
-        razorpayEnabled: !!(settings?.payment?.razorpayKeyId && settings?.payment?.razorpayKeySecret),
-        stripeEnabled: !!(settings?.payment?.stripePublicKey && settings?.payment?.stripeSecretKey),
-      },
-    })
+    const SettingsModel = Settings(req.tenantDB)
+    const settings = await SettingsModel.findOne({})
+    if (!settings) {
+      return res.status(404).json({ error: "Store settings not found." })
+    }
+    res.status(200).json(settings)
   } catch (error) {
-    res.status(500).json({ error: error.message })
+    console.error("❌ Error fetching public store settings:", error)
+    res.status(500).json({ error: "Internal server error." })
   }
 })
 
-// Health check for store
-router.get("/health", (req, res) => {
-  res.json({
-    status: "Store API is running",
-    storeId: req.storeId,
-    tenantId: req.tenantId,
-    timestamp: new Date().toISOString(),
-  })
+// Get all products for the store
+const Product = require("../models/tenant/Product")
+router.get("/products", async (req, res) => {
+  try {
+    const ProductModel = Product(req.tenantDB)
+    const products = await ProductModel.find({ isActive: true }).populate("category", "name")
+    res.status(200).json(products)
+  } catch (error) {
+    console.error("❌ Error fetching store products:", error)
+    res.status(500).json({ error: "Internal server error." })
+  }
 })
 
-// Debug endpoint to check what routes are available
-router.get("/debug/routes", (req, res) => {
-  res.json({
-    message: "Store routes debug info",
-    storeId: req.storeId,
-    tenantId: req.tenantId,
-    availableRoutes: [
-      "GET /api/:storeId/products",
-      "GET /api/:storeId/products/:id",
-      "GET /api/:storeId/categories",
-      "GET /api/:storeId/settings",
-      "GET /api/:storeId/health",
-      "POST /api/:storeId/auth/register",
-      "POST /api/:storeId/auth/login",
-      "GET /api/:storeId/auth/profile",
-      "POST /api/:storeId/orders",
-      "GET /api/:storeId/orders",
-      "GET /api/:storeId/orders/:orderId",
-      "POST /api/:storeId/payments/create-order",
-      "POST /api/:storeId/payments/verify-payment",
-      "GET /api/:storeId/payments/config",
-    ],
-    hasModels: !!req.models,
-    modelsList: req.models ? Object.keys(req.models) : [],
-  })
+// Get a single product by ID for the store
+router.get("/products/:id", async (req, res) => {
+  try {
+    const ProductModel = Product(req.tenantDB)
+    const product = await ProductModel.findOne({ _id: req.params.id, isActive: true }).populate("category", "name")
+    if (!product) {
+      return res.status(404).json({ error: "Product not found or not active." })
+    }
+    res.status(200).json(product)
+  } catch (error) {
+    console.error("❌ Error fetching single store product:", error)
+    res.status(500).json({ error: "Internal server error." })
+  }
+})
+
+// Get all categories for the store
+const Category = require("../models/tenant/Category")
+router.get("/categories", async (req, res) => {
+  try {
+    const CategoryModel = Category(req.tenantDB)
+    const categories = await CategoryModel.find({ isActive: true })
+    res.status(200).json(categories)
+  } catch (error) {
+    console.error("❌ Error fetching store categories:", error)
+    res.status(500).json({ error: "Internal server error." })
+  }
+})
+
+// Get a single category by ID for the store
+router.get("/categories/:id", async (req, res) => {
+  try {
+    const CategoryModel = Category(req.tenantDB)
+    const category = await CategoryModel.findOne({ _id: req.params.id, isActive: true })
+    if (!category) {
+      return res.status(404).json({ error: "Category not found or not active." })
+    }
+    res.status(200).json(category)
+  } catch (error) {
+    console.error("❌ Error fetching single store category:", error)
+    res.status(500).json({ error: "Internal server error." })
+  }
+})
+
+// Get all offers for the store
+const Offer = require("../models/tenant/Offer")
+router.get("/offers", async (req, res) => {
+  try {
+    const OfferModel = Offer(req.tenantDB)
+    // Only return active offers that are within their date range
+    const offers = await OfferModel.find({
+      isActive: true,
+      startDate: { $lte: new Date() },
+      endDate: { $gte: new Date() },
+    })
+      .populate("productIds", "name price")
+      .populate("categoryIds", "name")
+    res.status(200).json(offers)
+  } catch (error) {
+    console.error("❌ Error fetching store offers:", error)
+    res.status(500).json({ error: "Internal server error." })
+  }
 })
 
 module.exports = router

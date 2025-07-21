@@ -25,9 +25,10 @@ const OTPSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
-    expiresAt: {
+    createdAt: {
       type: Date,
-      required: true,
+      default: Date.now,
+      expires: 300, // OTP expires in 5 minutes (300 seconds)
     },
   },
   { timestamps: true },
@@ -36,11 +37,10 @@ const OTPSchema = new mongoose.Schema(
 // Static method to create a new OTP
 OTPSchema.statics.createOTP = async function (email, purpose) {
   const otp = Math.floor(100000 + Math.random() * 900000).toString() // 6-digit OTP
-  const expiresAt = new Date(Date.now() + 10 * 60 * 1000) // OTP valid for 10 minutes
 
   // Invalidate any existing unused OTPs for the same email and purpose
   await this.updateMany(
-    { email, purpose, isUsed: false, expiresAt: { $gt: new Date() } },
+    { email, purpose, isUsed: false },
     { $set: { isUsed: true } }, // Mark as used or expired
   )
 
@@ -48,7 +48,6 @@ OTPSchema.statics.createOTP = async function (email, purpose) {
     email,
     otp,
     purpose,
-    expiresAt,
   })
   return newOTP.otp // Return the OTP string
 }
@@ -59,7 +58,6 @@ OTPSchema.statics.verifyOTP = async function (email, otp, purpose) {
     email,
     purpose,
     isUsed: false,
-    expiresAt: { $gt: new Date() }, // Must not be expired
   })
 
   if (!otpDoc) {

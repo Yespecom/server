@@ -1,31 +1,38 @@
 const mongoose = require("mongoose")
 
-const PendingRegistrationSchema = new mongoose.Schema(
-  {
-    email: {
-      type: String,
-      required: true,
-      unique: true,
-      lowercase: true,
-      trim: true,
-    },
-    status: {
-      type: String,
-      enum: ["pending", "verified", "completed"],
-      default: "pending",
-    },
-    expiresAt: {
-      type: Date,
-      required: true,
-    },
-    verifiedAt: {
-      type: Date,
-    },
+const pendingRegistrationSchema = new mongoose.Schema({
+  email: {
+    type: String,
+    required: true,
+    unique: true,
+    lowercase: true,
+    trim: true,
   },
-  { timestamps: true },
-)
+  password: {
+    type: String,
+    required: true,
+  },
+  otp: {
+    type: String,
+    required: true,
+  },
+  storeName: {
+    type: String,
+    required: true,
+    trim: true,
+  },
+  storeId: {
+    type: String,
+    required: true,
+    unique: true,
+    uppercase: true,
+    trim: true,
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now,
+    expires: 600, // Expires in 10 minutes (600 seconds)
+  },
+})
 
-// Index for faster lookup and cleanup
-PendingRegistrationSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 }) // Automatically delete expired documents
-
-module.exports = mongoose.model("PendingRegistration", PendingRegistrationSchema)
+module.exports = mongoose.model("PendingRegistration", pendingRegistrationSchema)

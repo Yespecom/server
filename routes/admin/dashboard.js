@@ -30,6 +30,36 @@ router.use((req, res, next) => {
   next()
 })
 
+// Middleware to ensure tenantDB is available
+router.use(async (req, res, next) => {
+  try {
+    const token = req.header("Authorization")?.replace("Bearer ", "")
+    if (!token) {
+      return res.status(401).json({ error: "Access denied" })
+    }
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || "your-secret-key")
+    req.user = decoded
+
+    const mainUser = await User.findOne({ email: decoded.email })
+    if (!mainUser) {
+      return res.status(404).json({ error: "User not found" })
+    }
+
+    req.tenantDB = await getTenantDB(mainUser.tenantId)
+    req.tenantModels = {
+      Order: require("../models/tenant/Order")(req.tenantDB),
+      Product: require("../models/tenant/Product")(req.tenantDB),
+      Customer: require("../models/tenant/Customer")(req.tenantDB),
+    }
+
+    next()
+  } catch (error) {
+    console.error("❌ Error establishing tenant database connection:", error)
+    res.status(500).json({ error: "Failed to establish tenant database connection." })
+  }
+})
+
 // Helper function to generate 6-digit unique store ID
 const generateStoreId = async () => {
   let storeId
@@ -560,23 +590,16 @@ router.post("/login-otp", async (req, res) => {
 // Setup Store
 router.post("/setup-store", async (req, res) => {
   try {
-    const token = req.header("Authorization")?.replace("Bearer ", "")
-    if (!token) {
-      return res.status(401).json({ error: "Access denied" })
-    }
+    const { storeName, logo, banner, industry } = req.body
 
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || "your-secret-key")
+    const { tenantId } = req.user
 
-    // Get main user for tenant lookup
-    const mainUser = await User.findOne({ email: decoded.email })
+    const mainUser = await User.findOne({ tenantId })
     if (!mainUser) {
       return res.status(404).json({ error: "User not found" })
     }
 
-    // Get tenant user
-    const tenantDB = await getTenantDB(mainUser.tenantId)
-    const TenantUser = require("../models/tenant/User")(tenantDB)
-    const tenantUser = await TenantUser.findById(decoded.userId)
+    const tenantUser = await req.tenantModels.TenantUser.findById(req.user.userId)
 
     if (!tenantUser) {
       return res.status(404).json({ error: "Tenant user not found" })
@@ -586,11 +609,9 @@ router.post("/setup-store", async (req, res) => {
       return res.status(400).json({ error: "Store already exists for this user" })
     }
 
-    const { storeName, logo, banner, industry } = req.body
-
     // Generate unique 6-digit store ID
     const storeId = await generateStoreId()
-    console.log(`🏪 Setting up store with ID: ${storeId} for tenant: ${mainUser.tenantId}`)
+    console.log(`🏪 Setting up store with ID: ${storeId} for tenant: ${tenantId}`)
 
     // Update tenant user with store info
     tenantUser.hasStore = true
@@ -609,8 +630,7 @@ router.post("/setup-store", async (req, res) => {
     await mainUser.save()
 
     // Update settings with store info
-    const Settings = require("../models/tenant/Settings")(tenantDB)
-    const settings = await Settings.findOne()
+    const settings = await req.tenantModels.Settings.findOne()
     if (settings) {
       settings.general.storeName = storeName
       settings.general.logo = logo || ""
@@ -639,29 +659,16 @@ router.post("/setup-store", async (req, res) => {
 // Get user status
 router.get("/user/status", async (req, res) => {
   try {
-    const token = req.header("Authorization")?.replace("Bearer ", "")
-    if (!token) {
-      return res.status(401).json({ error: "Access denied" })
-    }
-
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || "your-secret-key")
-
-    // Get main user for tenant lookup
-    const mainUser = await User.findOne({ email: decoded.email })
-    if (!mainUser) {
-      return res.status(404).json({ error: "User not found" })
-    }
+    const { tenantId } = req.user
 
     // Get tenant user data
-    const tenantDB = await getTenantDB(mainUser.tenantId)
-    const TenantUser = require("../models/tenant/User")(tenantDB)
-    const tenantUser = await TenantUser.findById(decoded.userId).select("-password")
+    const tenantUser = await req.tenantModels.TenantUser.findById(req.user.userId).select("-password")
 
     res.json({
       user: tenantUser,
       hasStore: tenantUser.hasStore,
-      tenantId: mainUser.tenantId,
-      storeId: mainUser.storeId || null,
+      tenantId: tenantId,
+      storeId: req.user.storeId || null,
     })
   } catch (error) {
     console.error("❌ User status error:", error)
@@ -677,22 +684,16 @@ router.get("/stats", async (req, res) => {
     // Connect to tenant database
     await getTenantDB(tenantId)
 
-    const Product = require("../models/tenant/Product")
-    const Order = require("../models/tenant/Order")
-    const Customer = require("../models/tenant/Customer")
-    const Category = require("../models/tenant/Category")
-
-    // Get counts
     const [productCount, orderCount, customerCount, categoryCount] = await Promise.all([
-      Product.countDocuments(),
-      Order.countDocuments(),
-      Customer.countDocuments(),
-      Category.countDocuments(),
+      req.tenantModels.Product.countDocuments(),
+      req.tenantModels.Order.countDocuments(),
+      req.tenantModels.Customer.countDocuments(),
+      req.tenantModels.Category.countDocuments(),
     ])
 
     // Get recent orders
-    const recentOrders = await Order.find()
-      .populate("customer", "name email")
+    const recentOrders = await req.tenantModels.Order.find()
+      .populate("customerId", "firstName lastName email")
       .sort({ createdAt: -1 })
       .limit(5)
       .select("orderNumber totalAmount status createdAt")
@@ -701,7 +702,7 @@ router.get("/stats", async (req, res) => {
     const thirtyDaysAgo = new Date()
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
 
-    const revenueStats = await Order.aggregate([
+    const revenueStats = await req.tenantModels.Order.aggregate([
       {
         $match: {
           createdAt: { $gte: thirtyDaysAgo },
@@ -741,13 +742,7 @@ router.get("/stats", async (req, res) => {
 // Get sales analytics
 router.get("/analytics", async (req, res) => {
   try {
-    const { tenantId } = req.user
     const { period = "7d" } = req.query
-
-    // Connect to tenant database
-    await getTenantDB(tenantId)
-
-    const Order = require("../models/tenant/Order")
 
     const startDate = new Date()
     switch (period) {
@@ -764,7 +759,7 @@ router.get("/analytics", async (req, res) => {
         startDate.setDate(startDate.getDate() - 7)
     }
 
-    const analytics = await Order.aggregate([
+    const analytics = await req.tenantModels.Order.aggregate([
       {
         $match: {
           createdAt: { $gte: startDate },
@@ -795,49 +790,83 @@ router.get("/analytics", async (req, res) => {
 })
 
 // Get dashboard summary data
-router.get("/summary", async (req, res) => {
+router.get("/", async (req, res) => {
   try {
-    const Order = req.tenantModels.Order
-    const Product = req.tenantModels.Product
-    const Customer = req.tenantModels.Customer
-
-    const tenantId = req.user.tenantId // Get tenantId from authenticated user
+    const OrderModel = req.tenantModels.Order
+    const ProductModel = req.tenantModels.Product
+    const CustomerModel = req.tenantModels.Customer
 
     // Total orders
-    const totalOrders = await Order.countDocuments({ tenantId })
+    const totalOrders = await OrderModel.countDocuments()
 
-    // Total sales (sum of totalAmount from completed orders)
-    const totalSalesResult = await Order.aggregate([
-      { $match: { tenantId, status: "delivered", paymentStatus: "paid" } },
-      { $group: { _id: null, total: { $sum: "$totalAmount" } } },
+    // Total sales (sum of totalAmount from orders)
+    const totalSalesResult = await OrderModel.aggregate([
+      {
+        $group: {
+          _id: null,
+          total: { $sum: "$totalAmount" },
+        },
+      },
     ])
     const totalSales = totalSalesResult.length > 0 ? totalSalesResult[0].total : 0
 
     // Total products
-    const totalProducts = await Product.countDocuments({ tenantId, isActive: true })
+    const totalProducts = await ProductModel.countDocuments()
 
     // Total customers
-    const totalCustomers = await Customer.countDocuments({ tenantId, isActive: true })
+    const totalCustomers = await CustomerModel.countDocuments()
 
     // Recent orders (e.g., last 5)
-    const recentOrders = await Order.find({ tenantId }).sort({ createdAt: -1 }).limit(5).populate("customerId")
-
-    // Products with low stock (e.g., stock < 10)
-    const lowStockProducts = await Product.find({ tenantId, stock: { $lt: 10 }, isActive: true })
-      .sort({ stock: 1 })
+    const recentOrders = await OrderModel.find({})
+      .sort({ createdAt: -1 })
       .limit(5)
+      .populate("customerId", "firstName lastName email")
+      .populate("products.productId", "name")
 
-    res.json({
+    // Top selling products (example: by quantity sold)
+    const topSellingProducts = await OrderModel.aggregate([
+      { $unwind: "$products" },
+      {
+        $group: {
+          _id: "$products.productId",
+          totalQuantitySold: { $sum: "$products.quantity" },
+          totalRevenue: { $sum: { $multiply: ["$products.quantity", "$products.price"] } },
+        },
+      },
+      { $sort: { totalQuantitySold: -1 } },
+      { $limit: 5 },
+      {
+        $lookup: {
+          from: "products", // The collection name for products in MongoDB
+          localField: "_id",
+          foreignField: "_id",
+          as: "productInfo",
+        },
+      },
+      { $unwind: "$productInfo" },
+      {
+        $project: {
+          _id: 0,
+          productId: "$_id",
+          name: "$productInfo.name",
+          imageUrl: "$productInfo.imageUrl",
+          totalQuantitySold: 1,
+          totalRevenue: 1,
+        },
+      },
+    ])
+
+    res.status(200).json({
       totalOrders,
       totalSales,
       totalProducts,
       totalCustomers,
       recentOrders,
-      lowStockProducts,
+      topSellingProducts,
     })
   } catch (error) {
-    console.error("❌ Error fetching dashboard summary:", error)
-    res.status(500).json({ error: "Failed to fetch dashboard summary" })
+    console.error("❌ Error fetching dashboard data:", error)
+    res.status(500).json({ error: "Internal server error." })
   }
 })
 

@@ -1,275 +1,95 @@
 const express = require("express")
-const bcrypt = require("bcryptjs")
-const { getMainDb } = require("../db/connection")
-const User = require("../models/User") // Import the User model function
-const OTP = require("../models/OTP")
-const { sendOTPEmail } = require("../config/email")
-const { getTenantDB } = require("../config/tenantDB") // For updating tenant user password
-
 const router = express.Router()
+const bcrypt = require("bcryptjs")
+const jwt = require("jsonwebtoken")
+const { sendEmail } = require("../config/email")
+const { generateOTP } = require("../lib/utils") // Assuming you have a utility to generate OTP
+const { getMainDb } = require("../db/connection")
+const User = require("../models/User")(getMainDb()) // Main User model
+const OTP = require("../models/OTP") // Re-using OTP model for password reset
 
-// Send OTP for password reset
-router.post("/forgot-password", async (req, res) => {
-  try {
-    const { email } = req.body
+// Request password reset (send OTP)
+router.post("/request", async (req, res) => {
+  const { email } = req.body
 
-    console.log(`🔐 Password reset request for: ${email}`)
-
-    if (!email) {
-      return res.status(400).json({ error: "Email is required" })
-    }
-
-    // Validate email format
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
-    if (!emailRegex.test(email)) {
-      return res.status(400).json({ error: "Invalid email format" })
-    }
-
-    const mainConnection = getMainDb()
-    const UserModel = User(mainConnection)
-
-    // Check if user exists in main DB
-    const existingUser = await UserModel.findOne({ email })
-    if (!existingUser) {
-      return res.status(404).json({ error: "No account found with this email address" })
-    }
-
-    // Generate and save OTP
-    const otp = await OTP.createOTP(email, "password_reset")
-    console.log(`🔐 Generated password reset OTP for ${email}: ${otp}`)
-
-    // Send OTP via email
-    await sendOTPEmail(email, otp, "password reset")
-
-    res.json({
-      message: "Password reset code sent to your email",
-      email,
-      expiresIn: "10 minutes",
-    })
-  } catch (error) {
-    console.error("❌ Forgot password error:", error)
-    res.status(500).json({ error: error.message })
+  if (!email) {
+    return res.status(400).json({ error: "Email is required." })
   }
-})
 
-// Verify OTP for password reset (without consuming the OTP)
-router.post("/verify-reset-otp", async (req, res) => {
   try {
-    const { email, otp } = req.body
-
-    console.log(`🔍 Verifying reset OTP for: ${email}, OTP: ${otp}`)
-
-    if (!email || !otp) {
-      return res.status(400).json({ error: "Email and OTP are required" })
-    }
-
-    // Find OTP without consuming it
-    const otpDoc = await OTP.findOne({
-      email,
-      purpose: "password_reset",
-      isUsed: false,
-      expiresAt: { $gt: new Date() },
-    })
-
-    if (!otpDoc) {
-      console.log(`❌ No valid OTP found for ${email}`)
-      return res.status(400).json({ error: "Invalid or expired OTP" })
-    }
-
-    // Check attempts
-    if (otpDoc.attempts >= 3) {
-      await otpDoc.deleteOne()
-      return res.status(400).json({ error: "Too many failed attempts. Please request a new OTP." })
-    }
-
-    // Check OTP match
-    if (otpDoc.otp !== otp) {
-      console.log(`❌ OTP mismatch for ${email}. Expected: ${otpDoc.otp}, Received: ${otp}`)
-      otpDoc.attempts += 1
-      await otpDoc.save()
-      return res.status(400).json({
-        error: `Invalid OTP. ${3 - otpDoc.attempts} attempts remaining.`,
-      })
-    }
-
-    const mainConnection = getMainDb()
-    const UserModel = User(mainConnection)
-
-    // Check if user still exists
-    const user = await UserModel.findOne({ email })
+    const user = await User.findOne({ email: email.toLowerCase() })
     if (!user) {
-      return res.status(404).json({ error: "User not found" })
+      // For security, always return a generic message even if user not found
+      return res
+        .status(200)
+        .json({ message: "If an account with that email exists, a password reset OTP has been sent." })
     }
 
-    console.log(`✅ Password reset OTP verified for ${email} (OTP not consumed)`)
+    const otp = generateOTP() // Generate a 6-digit OTP
 
-    // DON'T delete the OTP here - we need it for the password reset step
-    res.json({
-      message: "OTP verified successfully. You can now reset your password.",
-      verified: true,
-      email,
+    // Delete any existing OTPs for this email to ensure only one is active
+    await OTP.deleteMany({ email: email.toLowerCase() })
+
+    const newOTP = new OTP({ email: email.toLowerCase(), otp })
+    await newOTP.save()
+
+    const appName = process.env.APP_NAME || "Your App"
+    const resetLink = `${process.env.FRONTEND_URL}/reset-password?email=${encodeURIComponent(email)}&otp=${otp}` // Example frontend link
+
+    const sendResult = await sendEmail({
+      to: email,
+      subject: `${otp} is your ${appName} password reset code`,
+      html: `<p>Your password reset code for ${appName} is: <strong>${otp}</strong>. It is valid for 5 minutes.</p>
+             <p>Alternatively, you can click this link to reset your password: <a href="${resetLink}">${resetLink}</a></p>
+             <p>If you did not request a password reset, please ignore this email.</p>`,
     })
+
+    if (!sendResult.success) {
+      console.error("❌ Failed to send password reset email:", sendResult.error)
+      return res.status(500).json({ error: "Failed to send password reset email." })
+    }
+
+    console.log(`✅ Password reset OTP sent to ${email}`)
+    res.status(200).json({ message: "If an account with that email exists, a password reset OTP has been sent." })
   } catch (error) {
-    console.error("❌ Verify reset OTP error:", error)
-    res.status(500).json({ error: error.message })
+    console.error("❌ Error requesting password reset:", error)
+    res.status(500).json({ error: "Internal server error while requesting password reset." })
   }
 })
 
-// Reset password with OTP verification
-router.post("/reset-password", async (req, res) => {
-  try {
-    const { email, otp, newPassword } = req.body
+// Verify OTP and reset password
+router.post("/reset", async (req, res) => {
+  const { email, otp, newPassword } = req.body
 
-    console.log(`🔐 Password reset attempt for: ${email}`)
-    console.log(`📝 Request body:`, {
-      email,
-      otp: otp ? "***" : "missing",
-      newPassword: newPassword ? "***" : "missing",
-    })
-
-    if (!email || !otp || !newPassword) {
-      console.log(`❌ Missing required fields: email=${!!email}, otp=${!!otp}, newPassword=${!!newPassword}`)
-      return res.status(400).json({ error: "Email, OTP, and new password are required" })
-    }
-
-    if (newPassword.length < 6) {
-      console.log(`❌ Password too short: ${newPassword.length} characters`)
-      return res.status(400).json({ error: "Password must be at least 6 characters long" })
-    }
-
-    // Find and verify OTP
-    const otpDoc = await OTP.findOne({
-      email,
-      purpose: "password_reset",
-      isUsed: false,
-      expiresAt: { $gt: new Date() },
-    })
-
-    if (!otpDoc) {
-      console.log(`❌ No valid OTP found for ${email}`)
-      return res.status(400).json({ error: "Invalid or expired OTP. Please request a new password reset code." })
-    }
-
-    // Check attempts
-    if (otpDoc.attempts >= 3) {
-      await otpDoc.deleteOne()
-      return res.status(400).json({ error: "Too many failed attempts. Please request a new OTP." })
-    }
-
-    // Verify OTP matches
-    if (otpDoc.otp !== otp) {
-      console.log(`❌ OTP mismatch for ${email}. Expected: ${otpDoc.otp}, Received: ${otp}`)
-      otpDoc.attempts += 1
-      await otpDoc.save()
-
-      if (otpDoc.attempts >= 3) {
-        await otpDoc.deleteOne()
-        return res.status(400).json({ error: "Too many failed attempts. Please request a new OTP." })
-      }
-
-      return res.status(400).json({
-        error: `Invalid OTP. ${3 - otpDoc.attempts} attempts remaining.`,
-      })
-    }
-
-    const mainConnection = getMainDb()
-    const UserModel = User(mainConnection)
-
-    // Find user in main DB
-    const mainUser = await UserModel.findOne({ email })
-    if (!mainUser) {
-      console.log(`❌ User not found in main DB: ${email}`)
-      return res.status(404).json({ error: "User not found" })
-    }
-
-    console.log(`👤 Found user in main DB: ${email}, tenantId: ${mainUser.tenantId}`)
-
-    // Update password in main DB
-    mainUser.password = newPassword // This will be hashed by the pre-save middleware
-    await mainUser.save()
-    console.log(`✅ Password updated in main DB for ${email}`)
-
-    // Update password in tenant DB as well
-    try {
-      const tenantDB = await getTenantDB(mainUser.tenantId)
-      const TenantUserModel = require("../models/tenant/User")(tenantDB) // Get tenant user model
-      const tenantUser = await TenantUserModel.findOne({ email })
-
-      if (tenantUser) {
-        tenantUser.password = newPassword // This will be hashed by the pre-save middleware
-        await tenantUser.save()
-        console.log(`✅ Password updated in tenant DB for ${email}`)
-      } else {
-        console.log(`⚠️ Tenant user not found for ${email}`)
-      }
-    } catch (tenantError) {
-      console.error("❌ Error updating tenant password:", tenantError)
-      // Don't fail the request if tenant update fails, log it instead
-    }
-
-    // NOW delete the OTP after successful password reset
-    await otpDoc.deleteOne()
-    console.log(`🗑️ OTP deleted for ${email}`)
-
-    console.log(`✅ Password reset completed for ${email}`)
-
-    res.json({
-      message: "Password reset successfully. You can now login with your new password.",
-      success: true,
-    })
-  } catch (error) {
-    console.error("❌ Reset password error:", error)
-    res.status(500).json({ error: error.message })
+  if (!email || !otp || !newPassword) {
+    return res.status(400).json({ error: "Email, OTP, and new password are required." })
   }
-})
 
-// Resend password reset OTP
-router.post("/resend-reset-otp", async (req, res) => {
   try {
-    const { email } = req.body
+    const foundOTP = await OTP.findOne({ email: email.toLowerCase(), otp })
 
-    console.log(`🔄 Resend reset OTP request for: ${email}`)
-
-    if (!email) {
-      return res.status(400).json({ error: "Email is required" })
+    if (!foundOTP) {
+      return res.status(400).json({ error: "Invalid or expired OTP." })
     }
 
-    // Check rate limiting
-    const recentOTP = await OTP.findOne({
-      email,
-      purpose: "password_reset",
-      createdAt: { $gt: new Date(Date.now() - 60 * 1000) }, // Last 1 minute
-    })
-
-    if (recentOTP) {
-      return res.status(429).json({
-        error: "Please wait 1 minute before requesting a new OTP",
-      })
+    const user = await User.findOne({ email: email.toLowerCase() })
+    if (!user) {
+      return res.status(404).json({ error: "User not found." })
     }
 
-    const mainConnection = getMainDb()
-    const UserModel = User(mainConnection)
+    // Hash the new password
+    const salt = await bcrypt.genSalt(10)
+    user.password = await bcrypt.hash(newPassword, salt)
+    await user.save()
 
-    // Check if user exists
-    const existingUser = await UserModel.findOne({ email })
-    if (!existingUser) {
-      return res.status(404).json({ error: "No account found with this email address" })
-    }
+    // Delete the OTP after successful reset
+    await OTP.deleteOne({ _id: foundOTP._id })
 
-    // Generate and send new OTP
-    const otp = await OTP.createOTP(email, "password_reset")
-    console.log(`🔄 Resent password reset OTP for ${email}: ${otp}`)
-
-    await sendOTPEmail(email, otp, "password reset")
-
-    res.json({
-      message: "New password reset code sent successfully",
-      email,
-      expiresIn: "10 minutes",
-    })
+    console.log(`✅ Password successfully reset for ${email}`)
+    res.status(200).json({ message: "Password reset successfully." })
   } catch (error) {
-    console.error("❌ Resend reset OTP error:", error)
-    res.status(500).json({ error: error.message })
+    console.error("❌ Error resetting password:", error)
+    res.status(500).json({ error: "Internal server error while resetting password." })
   }
 })
 

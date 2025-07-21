@@ -1,55 +1,51 @@
 const { getMainDb } = require("../db/connection")
-const User = require("../models/User") // Import the User model function
+const User = require("../models/User")(getMainDb()) // Pass the main DB connection
 
 async function checkMainUsers() {
   try {
-    // Ensure environment variables are loaded if this script is run standalone
-    require("dotenv").config()
-
-    if (!process.env.MAIN_DB_URI) {
-      console.error("❌ MAIN_DB_URI environment variable is not set.")
-      return
-    }
-
-    const mainConnection = getMainDb()
-    const UserModel = User(mainConnection) // Get the User model for the main connection
-
     console.log("🔍 Checking users in the main database...")
 
-    const users = await UserModel.find({})
+    // Ensure the main DB connection is established
+    const mainConnection = getMainDb()
+    if (mainConnection.readyState !== 1) {
+      console.error("❌ Main database connection is not open. Attempting to connect...")
+      // Wait for connection to be ready if it's still connecting
+      await new Promise((resolve, reject) => {
+        mainConnection.on("connected", resolve)
+        mainConnection.on("error", reject)
+        setTimeout(() => reject(new Error("Main DB connection timeout")), 10000) // 10 sec timeout
+      })
+      console.log("✅ Main database connection established for script.")
+    }
 
+    const users = await User.find({})
     if (users.length === 0) {
       console.log("⚠️ No users found in the main database.")
     } else {
-      console.log(`✅ Found ${users.length} user(s) in the main database:`)
+      console.log(`✅ Found ${users.length} users in the main database:`)
       users.forEach((user) => {
-        console.log(
-          `  - Email: ${user.email}, Tenant ID: ${user.tenantId}, Active: ${user.isActive}, Role: ${user.role}`,
-        )
-        // You can also check password hash format if needed
-        if (user.password && !user.password.startsWith("$2a$")) {
-          console.warn(`    ⚠️ Warning: Password for ${user.email} might not be bcrypt hashed.`)
-        }
+        console.log(`  - Email: ${user.email}, Tenant ID: ${user.tenantId || "N/A"}, Active: ${user.isActive}`)
+        // Note: Do NOT log user.password directly for security reasons.
       })
     }
   } catch (error) {
     console.error("❌ Error checking main users:", error)
   } finally {
-    // It's good practice to close the connection if this script is meant to run and exit
-    // However, if the main app is running, the connection should stay open.
-    // For a standalone script, you might want to close it:
+    // In a script, you might want to close the connection if it's not managed by the main app
+    // However, if this script is run as part of the app startup, keep it open.
+    // For a standalone script, you'd typically do:
     // const mainConnection = getMainDb();
-    // if (mainConnection && mainConnection.readyState === 1) {
+    // if (mainConnection.readyState === 1) {
     //   await mainConnection.close();
-    //   console.log("🔌 Main database connection closed after check.");
+    //   console.log("🔌 Main database connection closed by script.");
     // }
   }
 }
 
-// Execute the function if the script is run directly
+// Execute the function when the script is run directly
 if (require.main === module) {
+  require("dotenv").config() // Load environment variables for standalone execution
   checkMainUsers()
-} else {
-  // If imported as a module, export the function
-  module.exports = checkMainUsers
 }
+
+module.exports = checkMainUsers

@@ -1,5 +1,9 @@
 const express = require("express")
 const router = express.Router()
+const { getTenantDB } = require("../../config/tenantDB")
+const Payment = require("../../models/tenant/Payment") // Payment model factory
+const Order = require("../../models/tenant/Order") // Order model factory
+const Customer = require("../../models/tenant/Customer") // Customer model factory
 
 // Add logging middleware for payments routes
 router.use((req, res, next) => {
@@ -10,34 +14,13 @@ router.use((req, res, next) => {
   next()
 })
 
-// Middleware to ensure Payment model is available
-const ensurePaymentModel = (req, res, next) => {
-  try {
-    if (!req.tenantDB) {
-      console.error("❌ No tenant database connection available")
-      return res.status(500).json({
-        error: "Database connection not available",
-        details: "Tenant database connection is missing",
-      })
-    }
-
-    // Initialize Payment model
-    const Payment = require("../../models/tenant/Payment")(req.tenantDB)
-    req.PaymentModel = Payment
-
-    console.log("✅ Payment model initialized successfully")
-    next()
-  } catch (error) {
-    console.error("❌ Error initializing Payment model:", error)
-    res.status(500).json({
-      error: "Failed to initialize payment model",
-      details: error.message,
-    })
+// Middleware to ensure tenantDB is available
+router.use((req, res, next) => {
+  if (!req.tenantDB) {
+    return res.status(500).json({ error: "Tenant database connection not established." })
   }
-}
-
-// Apply the model middleware to all routes
-router.use(ensurePaymentModel)
+  next()
+})
 
 // Test endpoint to verify payments route is working
 router.get("/test", (req, res) => {
@@ -47,7 +30,6 @@ router.get("/test", (req, res) => {
     path: req.path,
     originalUrl: req.originalUrl,
     hasTenantDB: !!req.tenantDB,
-    hasPaymentModel: !!req.PaymentModel,
     tenantId: req.tenantId,
     timestamp: new Date().toISOString(),
   })
@@ -58,7 +40,7 @@ router.get("/summary", async (req, res) => {
   try {
     console.log("📊 Fetching payment summary...")
 
-    const Payment = req.PaymentModel
+    const PaymentModel = Payment(req.tenantDB)
 
     const today = new Date()
     today.setHours(0, 0, 0, 0)
@@ -68,7 +50,7 @@ router.get("/summary", async (req, res) => {
     thisMonth.setHours(0, 0, 0, 0)
 
     // Today's revenue (only successful payments)
-    const todayRevenue = await Payment.aggregate([
+    const todayRevenue = await PaymentModel.aggregate([
       {
         $match: {
           status: "success",
@@ -79,7 +61,7 @@ router.get("/summary", async (req, res) => {
     ])
 
     // This month's revenue (only successful payments)
-    const monthRevenue = await Payment.aggregate([
+    const monthRevenue = await PaymentModel.aggregate([
       {
         $match: {
           status: "success",
@@ -90,16 +72,16 @@ router.get("/summary", async (req, res) => {
     ])
 
     // Total revenue (only successful payments)
-    const totalRevenue = await Payment.aggregate([
+    const totalRevenue = await PaymentModel.aggregate([
       { $match: { status: "success" } },
       { $group: { _id: null, total: { $sum: "$amount" } } },
     ])
 
     // Additional stats for admin dashboard
-    const totalPayments = await Payment.countDocuments()
-    const successfulPayments = await Payment.countDocuments({ status: "success" })
-    const failedPayments = await Payment.countDocuments({ status: "failed" })
-    const pendingPayments = await Payment.countDocuments({ status: "pending" })
+    const totalPayments = await PaymentModel.countDocuments()
+    const successfulPayments = await PaymentModel.countDocuments({ status: "success" })
+    const failedPayments = await PaymentModel.countDocuments({ status: "failed" })
+    const pendingPayments = await PaymentModel.countDocuments({ status: "pending" })
 
     const summary = {
       todayRevenue: todayRevenue[0]?.total || 0,
@@ -130,7 +112,7 @@ router.get("/", async (req, res) => {
   try {
     console.log("💳 Fetching all payments...")
 
-    const Payment = req.tenantModels.Payment
+    const PaymentModel = Payment(req.tenantDB)
 
     // Get query parameters for filtering
     const {
@@ -179,13 +161,13 @@ router.get("/", async (req, res) => {
     console.log("🔍 Payment query:", { filter, sort, limit: Number.parseInt(limit), skip })
 
     // Get payments with optional filtering and pagination
-    const payments = await Payment.find(filter).sort(sort).limit(Number.parseInt(limit)).skip(skip).lean() // Use lean for better performance
+    const payments = await PaymentModel.find(filter).sort(sort).limit(Number.parseInt(limit)).skip(skip).lean() // Use lean for better performance
 
     // Get total count for pagination
-    const totalCount = await Payment.countDocuments(filter)
+    const totalCount = await PaymentModel.countDocuments(filter)
 
     // Get summary stats for the filtered results
-    const summaryStats = await Payment.aggregate([
+    const summaryStats = await PaymentModel.aggregate([
       { $match: filter },
       {
         $group: {
@@ -233,13 +215,17 @@ router.get("/:id", async (req, res) => {
   try {
     console.log("🔍 Fetching payment details for ID:", req.params.id)
 
-    const Payment = req.tenantModels.Payment
+    const PaymentModel = Payment(req.tenantDB)
 
     // Try to find by MongoDB _id first, then by paymentId
-    let payment = await Payment.findById(req.params.id).populate("orderId").populate("customerId")
+    let payment = await PaymentModel.findById(req.params.id)
+      .populate("orderId", "totalAmount status")
+      .populate("customerId", "firstName lastName email")
 
     if (!payment) {
-      payment = await Payment.findOne({ paymentId: req.params.id }).populate("orderId").populate("customerId")
+      payment = await PaymentModel.findOne({ paymentId: req.params.id })
+        .populate("orderId", "totalAmount status")
+        .populate("customerId", "firstName lastName email")
     }
 
     if (!payment) {
@@ -273,65 +259,82 @@ router.get("/:id", async (req, res) => {
 // Create a new payment (e.g., for manual entry or reconciliation)
 router.post("/", async (req, res) => {
   try {
-    const Payment = req.tenantModels.Payment
-    const { orderId, customerId, amount, paymentMethod, transactionId, status, paymentDate, notes } = req.body
+    const PaymentModel = Payment(req.tenantDB)
+    const OrderModel = Order(req.tenantDB)
+    const CustomerModel = Customer(req.tenantDB)
 
-    if (!orderId || !customerId || !amount || !paymentMethod) {
-      return res.status(400).json({ error: "Missing required payment fields" })
+    const { orderId, customerId, amount, currency, method, transactionId, status, paymentDate, notes } = req.body
+
+    if (!orderId || !customerId || !amount || !method) {
+      return res.status(400).json({ error: "Order ID, Customer ID, Amount, and Method are required." })
     }
 
-    const newPayment = new Payment({
-      tenantId: req.user.tenantId,
+    const order = await OrderModel.findById(orderId)
+    if (!order) {
+      return res.status(404).json({ error: "Order not found." })
+    }
+
+    const customer = await CustomerModel.findById(customerId)
+    if (!customer) {
+      return res.status(404).json({ error: "Customer not found." })
+    }
+
+    const newPayment = new PaymentModel({
       orderId,
       customerId,
       amount,
-      paymentMethod,
+      currency,
+      method,
       transactionId,
       status,
       paymentDate,
       notes,
     })
+
     await newPayment.save()
     res.status(201).json(newPayment)
   } catch (error) {
     console.error("❌ Error creating payment:", error)
-    res.status(500).json({ error: "Failed to create payment" })
+    if (error.code === 11000 && error.keyPattern && error.keyPattern.transactionId) {
+      return res.status(409).json({ error: "Payment with this transaction ID already exists." })
+    }
+    res.status(500).json({ error: "Internal server error." })
   }
 })
 
 // Update payment status or details
 router.put("/:id", async (req, res) => {
   try {
-    const Payment = req.tenantModels.Payment
-    const { amount, paymentMethod, transactionId, status, paymentDate, notes } = req.body
-
-    const updatedPayment = await Payment.findByIdAndUpdate(
-      req.params.id,
-      { amount, paymentMethod, transactionId, status, paymentDate, notes },
-      { new: true, runValidators: true },
-    )
+    const PaymentModel = Payment(req.tenantDB)
+    const updatedPayment = await PaymentModel.findByIdAndUpdate(req.params.id, req.body, {
+      new: true,
+      runValidators: true,
+    })
     if (!updatedPayment) {
-      return res.status(404).json({ error: "Payment not found" })
+      return res.status(404).json({ error: "Payment not found." })
     }
-    res.json(updatedPayment)
+    res.status(200).json(updatedPayment)
   } catch (error) {
     console.error("❌ Error updating payment:", error)
-    res.status(500).json({ error: "Failed to update payment" })
+    if (error.code === 11000 && error.keyPattern && error.keyPattern.transactionId) {
+      return res.status(409).json({ error: "Payment with this transaction ID already exists." })
+    }
+    res.status(500).json({ error: "Internal server error." })
   }
 })
 
 // Delete a payment (use with caution)
 router.delete("/:id", async (req, res) => {
   try {
-    const Payment = req.tenantModels.Payment
-    const deletedPayment = await Payment.findByIdAndDelete(req.params.id)
+    const PaymentModel = Payment(req.tenantDB)
+    const deletedPayment = await PaymentModel.findByIdAndDelete(req.params.id)
     if (!deletedPayment) {
-      return res.status(404).json({ error: "Payment not found" })
+      return res.status(404).json({ error: "Payment not found." })
     }
-    res.json({ message: "Payment deleted successfully" })
+    res.status(200).json({ message: "Payment deleted successfully." })
   } catch (error) {
     console.error("❌ Error deleting payment:", error)
-    res.status(500).json({ error: "Failed to delete payment" })
+    res.status(500).json({ error: "Internal server error." })
   }
 })
 
@@ -340,10 +343,10 @@ router.get("/stats/overview", async (req, res) => {
   try {
     console.log("📈 Fetching payment statistics...")
 
-    const Payment = req.tenantModels.Payment
+    const PaymentModel = Payment(req.tenantDB)
 
     // Get payments by status
-    const statusStats = await Payment.aggregate([
+    const statusStats = await PaymentModel.aggregate([
       {
         $match: { tenantId: req.user.tenantId },
       },
@@ -357,7 +360,7 @@ router.get("/stats/overview", async (req, res) => {
     ])
 
     // Get payments by method
-    const methodStats = await Payment.aggregate([
+    const methodStats = await PaymentModel.aggregate([
       {
         $match: { tenantId: req.user.tenantId },
       },
@@ -374,7 +377,7 @@ router.get("/stats/overview", async (req, res) => {
     const thirtyDaysAgo = new Date()
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
 
-    const dailyRevenue = await Payment.aggregate([
+    const dailyRevenue = await PaymentModel.aggregate([
       {
         $match: {
           status: "success",
@@ -404,7 +407,7 @@ router.get("/stats/overview", async (req, res) => {
     const tomorrow = new Date(today)
     tomorrow.setDate(tomorrow.getDate() + 1)
 
-    const hourlyStats = await Payment.aggregate([
+    const hourlyStats = await PaymentModel.aggregate([
       {
         $match: {
           createdAt: { $gte: today, $lt: tomorrow },

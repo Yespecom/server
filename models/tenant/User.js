@@ -20,8 +20,21 @@ module.exports = (connection) => {
       phone: { type: String },
       role: {
         type: String,
-        enum: ["customer", "staff", "admin"], // Roles within the tenant's context
-        default: "customer",
+        enum: ["admin", "staff"], // Roles within the tenant's context
+        default: "admin",
+      },
+      hasStore: {
+        type: Boolean,
+        default: false,
+      },
+      storeInfo: {
+        name: String,
+        logoUrl: String,
+        theme: {
+          primaryColor: String,
+          secondaryColor: String,
+        },
+        // Add other store-specific settings here
       },
       isActive: {
         type: Boolean,

@@ -402,4 +402,4 @@ productSchema.index({ category: 1, price: 1 })
 productSchema.index({ isActive: 1, status: 1, createdAt: -1 })
 productSchema.index({ category: 1, isActive: 1, status: 1 })
 
-module.exports = (connection) => connection.models.Product || connection.model("Product", productSchema)
+module.exports = (tenantDB) => tenantDB.models.Product || tenantDB.model("Product", productSchema)

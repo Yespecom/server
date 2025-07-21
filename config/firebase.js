@@ -67,10 +67,11 @@ const initializeFirebase = () => {
   }
 }
 
-// Check if Firebase app is already initialized
+// Check if Firebase app is already initialized to prevent re-initialization errors
 if (!admin.apps.length) {
   try {
     // Parse the private key from environment variable
+    // Replace newline characters if they are escaped in the environment variable
     const privateKey = process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n")
 
     admin.initializeApp({
@@ -86,15 +87,14 @@ if (!admin.apps.length) {
         auth_provider_x509_cert_url: process.env.FIREBASE_AUTH_PROVIDER_X509_CERT_URL,
         client_x509_cert_url: process.env.FIREBASE_CLIENT_X509_CERT_URL,
       }),
-      // You might need to add databaseURL or storageBucket if you're using other Firebase services
-      // databaseURL: "https://<DATABASE_NAME>.firebaseio.com",
-      // storageBucket: "gs://<BUCKET_NAME>.appspot.com",
+      // You might need to add databaseURL if you're using Realtime Database
+      // databaseURL: "https://<YOUR_PROJECT_ID>.firebaseio.com"
     })
     console.log("✅ Firebase Admin SDK initialized successfully.")
   } catch (error) {
     console.error("❌ Error initializing Firebase Admin SDK:", error.message)
-    // It's crucial to handle this error, as other parts of your app might depend on Firebase
-    // process.exit(1); // Consider exiting if Firebase is critical
+    // Exit process or handle error appropriately if Firebase is critical
+    // process.exit(1);
   }
 } else {
   console.log("✅ Firebase Admin SDK already initialized.")

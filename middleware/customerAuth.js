@@ -1,49 +1,50 @@
 const jwt = require("jsonwebtoken")
 const { getTenantDB } = require("../config/tenantDB")
-const TenantUser = require("../models/tenant/User") // Import the tenant User model function
+const Customer = require("../models/tenant/Customer") // Customer model factory
 
 const customerAuthMiddleware = async (req, res, next) => {
-  let token
+  const authHeader = req.headers.authorization
 
-  // Check for token in Authorization header
-  if (req.headers.authorization && req.headers.authorization.startsWith("Bearer")) {
-    token = req.headers.authorization.split(" ")[1]
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    console.log("❌ Customer Auth: No token provided or invalid format.")
+    return res.status(401).json({ error: "No customer token provided or invalid format." })
   }
 
-  if (!token) {
-    console.log("❌ Customer Auth middleware: No token provided.")
-    return res.status(401).json({ message: "No token, authorization denied" })
-  }
+  const token = authHeader.split(" ")[1]
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET)
-    req.customer = decoded // Attach customer payload (email, customerId, tenantId) to request
+    console.log("✅ Customer Auth: Token decoded successfully for customer:", decoded.email)
 
-    console.log(`✅ Customer Auth middleware: Token verified for customer ${decoded.email}`)
-
-    // Ensure tenantId is available from the request context (set by storeContextMiddleware)
-    const tenantId = req.tenantId || decoded.tenantId // Fallback to token's tenantId if not set by context
-    if (!tenantId) {
-      console.log("❌ Customer Auth middleware: Tenant ID not found in request or token.")
-      return res.status(400).json({ message: "Tenant ID is missing." })
+    // Ensure tenantId is available from a previous middleware (e.g., storeContextMiddleware)
+    if (!req.tenantId) {
+      console.error("❌ Customer Auth: tenantId not set in request. Store context missing.")
+      return res.status(500).json({ error: "Internal server error: Store context not established." })
     }
 
-    // Get the tenant-specific User model
-    const tenantDbConnection = await getTenantDB(tenantId)
-    const CustomerModel = TenantUser(tenantDbConnection) // Assuming TenantUser model is used for customers
+    const tenantDB = req.tenantDB // Should be set by storeContextMiddleware
+    if (!tenantDB) {
+      console.error("❌ Customer Auth: Tenant DB connection not available in request.")
+      return res.status(500).json({ error: "Internal server error: Tenant database not connected." })
+    }
 
-    // Fetch customer from tenant DB to ensure they are active
+    const CustomerModel = Customer(tenantDB)
     const customer = await CustomerModel.findById(decoded.customerId)
 
     if (!customer || !customer.isActive) {
-      console.log(`❌ Customer Auth middleware: Customer ${decoded.email} not found or inactive in tenant DB.`)
-      return res.status(401).json({ message: "Not authorized, customer not found or inactive" })
+      console.log("❌ Customer Auth: Customer not found or inactive after token verification.")
+      return res.status(401).json({ error: "Unauthorized: Customer not found or inactive." })
     }
 
+    req.customer = customer // Attach the customer object to the request
+    req.customerId = decoded.customerId
     next()
-  } catch (err) {
-    console.error("❌ Customer Auth middleware error:", err.message)
-    res.status(401).json({ message: "Customer token is not valid or expired" })
+  } catch (error) {
+    console.error("❌ Customer Auth: Token verification failed:", error.message)
+    if (error.name === "TokenExpiredError") {
+      return res.status(401).json({ error: "Unauthorized: Customer token expired." })
+    }
+    return res.status(401).json({ error: "Unauthorized: Invalid customer token." })
   }
 }
 

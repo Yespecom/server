@@ -1,14 +1,18 @@
 const express = require("express")
 const cors = require("cors")
-const dotenv = require("dotenv")
-const mongoose = require("mongoose")
-const multer = require("multer")
+const path = require("path")
+const { getMainDb } = require("./db/connection") // Updated import
+const { closeAllTenantDBs } = require("./config/tenantDB") // Import for graceful shutdown
+const multer = require("multer") // Assuming multer is used for file uploads
 
-// Load environment variables
-dotenv.config()
+// Load environment variables (if not already loaded by dotenv.config() in main app)
+require("dotenv").config()
 
 const app = express()
 const PORT = process.env.PORT || 5000
+
+// Connect to Main DB at startup
+getMainDb()
 
 // Middleware
 app.use(cors())
@@ -34,7 +38,7 @@ app.use(
 )
 
 app.use(express.urlencoded({ extended: true }))
-app.use("/uploads", express.static("uploads"))
+app.use("/uploads", express.static("uploads")) // Serve static files from 'uploads' directory
 
 // Import routes
 const authRoutes = require("./routes/auth")
@@ -43,16 +47,9 @@ const storeRoutes = require("./routes/store")
 const otpRoutes = require("./routes/otp")
 const passwordResetRoutes = require("./routes/password-reset")
 
-// Import middleware
+// Import middleware (if needed, though some are applied directly in routes)
 const authMiddleware = require("./middleware/auth")
 const storeContextMiddleware = require("./middleware/storeContext")
-
-// Database connections
-const connectMainDB = require("./config/mainDB")
-const { closeAllTenantDBs } = require("./config/tenantDB")
-
-// Connect to main database
-connectMainDB()
 
 // Add detailed logging middleware - BEFORE route registration
 app.use((req, res, next) => {
@@ -281,8 +278,13 @@ app.use("*", (req, res) => {
 // Graceful shutdown
 process.on("SIGINT", async () => {
   console.log("🛑 Shutting down gracefully...")
-  await closeAllTenantDBs()
-  await mongoose.connection.close()
+  await closeAllTenantDBs() // Close all tenant connections
+  const mainConnection = getMainDb()
+  if (mainConnection && mainConnection.readyState === 1) {
+    // Check if main connection is open
+    await mainConnection.close()
+    console.log("🔌 Main database connection closed.")
+  }
   process.exit(0)
 })
 

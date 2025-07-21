@@ -133,18 +133,13 @@ router.get("/debug", async (req, res) => {
   }
 })
 
-// NEW: Debug endpoint to verify a password against a stored hash
-router.post("/debug/verify-password", async (req, res) => {
+// Debug endpoint to fix customer password
+router.post("/debug/fix-password", async (req, res) => {
   try {
-    // IMPORTANT: This endpoint should be removed or heavily secured in production
-    if (process.env.NODE_ENV === "production") {
-      return res.status(404).json({ error: "Not found in production" })
-    }
+    const { email, newPassword } = req.body
 
-    const { email, plainTextPassword } = req.body
-
-    if (!email || !plainTextPassword) {
-      return res.status(400).json({ error: "Email and plainTextPassword are required" })
+    if (!email || !newPassword) {
+      return res.status(400).json({ error: "Email and new password are required" })
     }
 
     if (!req.models) {
@@ -158,36 +153,34 @@ router.post("/debug/verify-password", async (req, res) => {
       return res.status(404).json({ error: "Customer not found" })
     }
 
-    if (!customer.password) {
-      return res.status(400).json({ error: "Customer has no password set" })
-    }
+    // Hash the new password
+    const hashedPassword = await bcrypt.hash(newPassword, 12)
 
-    console.log(`🔍 Debugging password verification for: ${email}`)
-    console.log(`   - Provided plain text password: ${plainTextPassword}`)
-    console.log(`   - Stored hash (first 20 chars): ${customer.password.substring(0, 20)}...`)
+    console.log(`🔧 Fixing password for ${email}`)
+    console.log(`🔧 Old password hash: ${customer.password}`)
+    console.log(`🔧 New password hash: ${hashedPassword}`)
 
-    const isMatch = await customer.comparePassword(plainTextPassword)
+    // Update the password
+    customer.password = hashedPassword
+    await customer.save()
 
-    console.log(`🧪 bcrypt.compare result: ${isMatch ? "MATCH" : "NO MATCH"}`)
+    // Test the new password
+    const testResult = await bcrypt.compare(newPassword, hashedPassword)
 
     res.json({
-      message: "Password verification debug result",
-      email: customer.email,
-      hasStoredPassword: !!customer.password,
-      isMatch: isMatch,
-      // For extreme debugging, but warn user to remove in production
-      debugInfo:
-        process.env.NODE_ENV === "development"
-          ? {
-              providedPassword: plainTextPassword,
-              storedHash: customer.password,
-            }
-          : undefined,
+      message: "Password updated successfully",
+      customer: {
+        id: customer._id,
+        email: customer.email,
+        name: customer.name,
+      },
+      passwordTest: testResult,
+      newPasswordHash: hashedPassword,
     })
   } catch (error) {
-    console.error("❌ Debug verify password error:", error)
+    console.error("❌ Fix password error:", error)
     res.status(500).json({
-      error: "Failed to debug password verification",
+      error: "Failed to fix password",
       details: error.message,
     })
   }
@@ -258,11 +251,15 @@ router.post("/register", async (req, res) => {
       })
     }
 
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 12)
+    console.log(`🔐 Hashing password for ${email}: ${password} -> ${hashedPassword}`)
+
     // Create new customer
     const customer = new Customer({
       name: name.trim(),
       email: email.toLowerCase(),
-      password: password, // Password will be hashed by pre-save middleware
+      password: hashedPassword,
       phone: phone || "",
       totalSpent: 0,
       orderCount: 0,
@@ -368,7 +365,7 @@ router.post("/login", async (req, res) => {
     )
     console.log(`   - Is Active: ${customer.isActive}`)
 
-    // Check if account needs migration (no password set)
+    // Check if account needs migration
     if (!customer.password) {
       console.log("❌ Customer has no password - needs migration")
       return res.status(400).json({
@@ -383,9 +380,12 @@ router.post("/login", async (req, res) => {
       })
     }
 
-    // Verify password using the model's method
-    console.log(`🔐 Comparing password for customer: ${email}`)
-    const isPasswordValid = await customer.comparePassword(password) // Use model method
+    // Verify password with detailed logging
+    console.log(`🔐 Comparing password...`)
+    console.log(`   - Input password (first 5 chars): "${password.substring(0, 5)}..."`)
+    console.log(`   - Stored hash: ${customer.password}`)
+
+    const isPasswordValid = await bcrypt.compare(password, customer.password)
     console.log(`🔐 Password comparison result: ${isPasswordValid}`)
 
     if (!isPasswordValid) {

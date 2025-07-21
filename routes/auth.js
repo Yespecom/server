@@ -1,28 +1,46 @@
 const express = require("express")
 const jwt = require("jsonwebtoken")
+const bcrypt = require("bcryptjs")
 const User = require("../models/User")
-const PendingRegistration = require("../models/PendingRegistration") // New model
+const PendingRegistration = require("../models/PendingRegistration")
 const { getTenantDB } = require("../config/tenantDB")
 const router = express.Router()
 const OTP = require("../models/OTP")
-const { sendWelcomeEmail, sendOTPEmail } = require("../config/email") // Import sendOTPEmail
+const { sendWelcomeEmail, sendOTPEmail } = require("../config/email")
+
+// Add request logging middleware
+router.use((req, res, next) => {
+  console.log(`📍 AUTH ROUTE: ${req.method} ${req.path}`)
+  console.log(`🔍 Host: ${req.get("host")}`)
+  console.log(`🔍 Headers:`, {
+    host: req.get("host"),
+    authorization: req.get("authorization") || "None",
+    "content-type": req.get("content-type"),
+    "user-agent": req.get("user-agent"),
+  })
+
+  // Log request body for POST requests
+  if (req.method === "POST" && req.body) {
+    console.log(`📦 Request Body:`, {
+      ...req.body,
+      password: req.body.password ? "[HIDDEN]" : undefined,
+    })
+  }
+
+  next()
+})
 
 // Helper function to generate 6-digit unique store ID
 const generateStoreId = async () => {
   let storeId
   let isUnique = false
-
   while (!isUnique) {
-    // Generate 6-digit alphanumeric code
     storeId = Math.random().toString(36).substring(2, 8).toUpperCase()
-
-    // Check if this store ID already exists in main DB
     const existingUser = await User.findOne({ storeId: storeId })
     if (!existingUser) {
       isUnique = true
     }
   }
-
   return storeId
 }
 
@@ -41,7 +59,6 @@ const validateEmail = (email) => {
 router.post("/register/initiate", async (req, res) => {
   try {
     const { name, email, phone, password } = req.body
-
     console.log(`📝 Initiate registration request for: ${email}`)
 
     // Validate required fields
@@ -123,7 +140,6 @@ router.post("/register/initiate", async (req, res) => {
 router.post("/register/complete", async (req, res) => {
   try {
     const { email, otp } = req.body
-
     console.log(`✅ Complete registration request for: ${email}`)
 
     if (!email || !otp) {
@@ -172,7 +188,6 @@ router.post("/register/complete", async (req, res) => {
       const Offer = require("../models/tenant/Offer")(tenantDB)
       const Payment = require("../models/tenant/Payment")(tenantDB)
       const Settings = require("../models/tenant/Settings")(tenantDB)
-
       console.log(`📋 Models initialized for tenant: ${tenantId}`)
 
       // Create user in tenant DB with full data
@@ -271,58 +286,100 @@ router.post("/register/complete", async (req, res) => {
   }
 })
 
-// Login
+// Login Route
 router.post("/login", async (req, res) => {
   try {
+    console.log("🔐 Login attempt started")
+
     const { email, password } = req.body
 
+    // Validate input
+    if (!email || !password) {
+      console.log("❌ Missing email or password")
+      return res.status(400).json({ error: "Email and password are required" })
+    }
+
+    console.log(`🔍 Looking for user: ${email}`)
+
     // Find user in main DB for auth
-    const mainUser = await User.findOne({ email })
+    const mainUser = await User.findOne({ email: email.toLowerCase().trim() })
     if (!mainUser) {
+      console.log(`❌ User not found in main DB: ${email}`)
       return res.status(400).json({ error: "Invalid credentials" })
     }
 
-    // Check password
-    const isMatch = await mainUser.comparePassword(password)
-    if (!isMatch) {
-      return res.status(400).json({ error: "Invalid credentials" })
+    console.log(`✅ Found main user: ${email}, tenantId: ${mainUser.tenantId}`)
+
+    // Use direct bcrypt comparison for reliability
+    try {
+      console.log(`🔍 Comparing password for user: ${email}`)
+
+      const isMatch = await bcrypt.compare(password, mainUser.password)
+      console.log(`🔑 Password comparison result: ${isMatch}`)
+
+      if (!isMatch) {
+        console.log(`❌ Password mismatch for user: ${email}`)
+        return res.status(400).json({ error: "Invalid credentials" })
+      }
+    } catch (passwordError) {
+      console.error(`❌ Password comparison error:`, passwordError)
+      return res.status(500).json({ error: "Authentication error" })
     }
+
+    console.log(`✅ Password verified for user: ${email}`)
 
     // Get tenant DB and user data
-    const tenantDB = await getTenantDB(mainUser.tenantId)
-    const TenantUser = require("../models/tenant/User")(tenantDB)
-    const tenantUser = await TenantUser.findOne({ email })
+    try {
+      const tenantDB = await getTenantDB(mainUser.tenantId)
+      console.log(`✅ Connected to tenant DB: ${mainUser.tenantId}`)
 
-    if (!tenantUser) {
-      return res.status(400).json({ error: "User data not found" })
-    }
+      const TenantUser = require("../models/tenant/User")(tenantDB)
+      const tenantUser = await TenantUser.findOne({ email: email.toLowerCase().trim() })
 
-    // Generate JWT
-    const token = jwt.sign(
-      {
-        userId: tenantUser._id,
+      if (!tenantUser) {
+        console.log(`❌ Tenant user not found: ${email}`)
+        return res.status(400).json({ error: "User data not found" })
+      }
+
+      console.log(`✅ Found tenant user: ${email}`)
+
+      // Generate JWT
+      const token = jwt.sign(
+        {
+          userId: tenantUser._id,
+          tenantId: mainUser.tenantId,
+          email: email,
+        },
+        process.env.JWT_SECRET || "your-secret-key",
+        { expiresIn: "7d" },
+      )
+
+      console.log(`✅ JWT generated for user: ${email}`)
+
+      // Prepare response
+      const response = {
+        token,
         tenantId: mainUser.tenantId,
-        email: email,
-      },
-      process.env.JWT_SECRET || "your-secret-key",
-      { expiresIn: "7d" },
-    )
+        storeId: mainUser.storeId || null,
+        hasStore: tenantUser.hasStore || false,
+        user: {
+          name: tenantUser.name,
+          email: tenantUser.email,
+          phone: tenantUser.phone || "",
+          role: tenantUser.role,
+        },
+      }
 
-    res.json({
-      token,
-      tenantId: mainUser.tenantId,
-      storeId: mainUser.storeId || null,
-      hasStore: tenantUser.hasStore,
-      user: {
-        name: tenantUser.name,
-        email: tenantUser.email,
-        phone: tenantUser.phone,
-        role: tenantUser.role,
-      },
-    })
+      console.log(`✅ Login successful for: ${email}`)
+
+      res.json(response)
+    } catch (tenantError) {
+      console.error(`❌ Tenant DB error for ${mainUser.tenantId}:`, tenantError)
+      return res.status(500).json({ error: "Failed to access user data" })
+    }
   } catch (error) {
     console.error("❌ Login error:", error)
-    res.status(500).json({ error: error.message })
+    res.status(500).json({ error: "Internal server error" })
   }
 })
 
@@ -451,8 +508,8 @@ router.post("/setup-store", async (req, res) => {
       message: "Store setup completed successfully",
       tenantId: mainUser.tenantId,
       storeId,
-      storeUrl: `${baseUrl}/api/${storeId.toLowerCase()}`, // Updated to use path-based routing
-      adminUrl: `${baseUrl}/api/admin`, // Admin URL remains consistent
+      storeUrl: `${baseUrl}/api/${storeId.toLowerCase()}`,
+      adminUrl: `${baseUrl}/api/admin`,
     })
   } catch (error) {
     console.error("❌ Store setup error:", error)
@@ -460,35 +517,62 @@ router.post("/setup-store", async (req, res) => {
   }
 })
 
-// Get user status
+// Get user status - MOVED TO CORRECT LOCATION
 router.get("/user/status", async (req, res) => {
   try {
     const token = req.header("Authorization")?.replace("Bearer ", "")
     if (!token) {
-      return res.status(401).json({ error: "Access denied" })
+      return res.status(401).json({ error: "Access denied. No token provided." })
     }
 
+    console.log("🔍 Getting user status...")
+
     const decoded = jwt.verify(token, process.env.JWT_SECRET || "your-secret-key")
+    console.log("✅ Token decoded:", { email: decoded.email, tenantId: decoded.tenantId })
 
     // Get main user for tenant lookup
     const mainUser = await User.findOne({ email: decoded.email })
     if (!mainUser) {
+      console.log("❌ Main user not found")
       return res.status(404).json({ error: "User not found" })
     }
+
+    console.log("✅ Main user found:", { tenantId: mainUser.tenantId, storeId: mainUser.storeId })
 
     // Get tenant user data
     const tenantDB = await getTenantDB(mainUser.tenantId)
     const TenantUser = require("../models/tenant/User")(tenantDB)
     const tenantUser = await TenantUser.findById(decoded.userId).select("-password")
 
+    if (!tenantUser) {
+      console.log("❌ Tenant user not found")
+      return res.status(404).json({ error: "Tenant user not found" })
+    }
+
+    console.log("✅ Tenant user found:", { hasStore: tenantUser.hasStore })
+
     res.json({
-      user: tenantUser,
+      user: {
+        id: tenantUser._id,
+        name: tenantUser.name,
+        email: tenantUser.email,
+        phone: tenantUser.phone,
+        role: tenantUser.role,
+        hasStore: tenantUser.hasStore,
+        storeInfo: tenantUser.storeInfo || null,
+      },
       hasStore: tenantUser.hasStore,
       tenantId: mainUser.tenantId,
       storeId: mainUser.storeId || null,
     })
   } catch (error) {
     console.error("❌ User status error:", error)
+    if (error.name === "JsonWebTokenError") {
+      return res.status(401).json({ error: "Invalid token" })
+    }
+    if (error.name === "TokenExpiredError") {
+      return res.status(401).json({ error: "Token expired" })
+    }
     res.status(500).json({ error: error.message })
   }
 })

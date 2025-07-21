@@ -1,8 +1,8 @@
 const express = require("express")
 const jwt = require("jsonwebtoken")
 const bcrypt = require("bcryptjs")
-const User = require("../models/User")
-const PendingRegistration = require("../models/PendingRegistration")
+const User = require("../models/User") // Ensure this model has a pre-save hashing hook
+const PendingRegistration = require("../models/PendingRegistration") // Ensure this model has a pre-save hashing hook
 const { getTenantDB } = require("../config/tenantDB")
 const router = express.Router()
 const OTP = require("../models/OTP")
@@ -103,6 +103,7 @@ router.post("/register/initiate", async (req, res) => {
     }
 
     // Generate salt and hash the password
+    // This explicit hashing is a safeguard. Ideally, your Mongoose model's pre-save hook handles this.
     const salt = await bcrypt.genSalt(10)
     const hashedPassword = await bcrypt.hash(password, salt)
     console.log(`🔒 Hashed password for ${email}`)
@@ -286,6 +287,7 @@ router.post("/login", async (req, res) => {
     // Use direct bcrypt comparison for reliability
     try {
       console.log(`🔍 Comparing password for user: ${email}`)
+      // THIS IS THE CORRECT COMPARISON LOGIC
       const isMatch = await bcrypt.compare(password, mainUser.password)
       console.log(`🔑 Password comparison result: ${isMatch}`)
       if (!isMatch) {

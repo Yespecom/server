@@ -11,7 +11,7 @@ const getTenantDB = async (tenantId) => {
   try {
     const dbUri = process.env.TENANT_DB_URI
       ? `${process.env.TENANT_DB_URI}${tenantId}`
-      : `mongodb://localhost:27017/yesp_${tenantId}`
+      : `mongodb://127.0.0.1:27017/yesp_${tenantId}`
 
     console.log(`🔌 Creating new DB connection for tenant: ${tenantId}`)
     console.log(`📍 DB URI: ${dbUri}`)
@@ -20,9 +20,9 @@ const getTenantDB = async (tenantId) => {
       useNewUrlParser: true,
       useUnifiedTopology: true,
       maxPoolSize: 10,
-      serverSelectionTimeoutMS: 60000, // Increased to 60 seconds
-      socketTimeoutMS: 60000, // Set to 60 seconds
-    })
+      serverSelectionTimeoutMS: 60000,
+      socketTimeoutMS: 60000,
+    }).asPromise() // ✅ Ensures connection is ready before continuing
 
     // Handle connection events
     connection.on("connected", () => {

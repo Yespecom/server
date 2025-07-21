@@ -67,6 +67,30 @@ const initializeFirebase = () => {
   }
 }
 
+// Check if Firebase app is already initialized
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert({
+      type: process.env.FIREBASE_TYPE,
+      project_id: process.env.FIREBASE_PROJECT_ID,
+      private_key_id: process.env.FIREBASE_PRIVATE_KEY_ID,
+      private_key: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"), // Handle newline characters
+      client_email: process.env.FIREBASE_CLIENT_EMAIL,
+      client_id: process.env.FIREBASE_CLIENT_ID,
+      auth_uri: process.env.FIREBASE_AUTH_URI,
+      token_uri: process.env.FIREBASE_TOKEN_URI,
+      auth_provider_x509_cert_url: process.env.FIREBASE_AUTH_PROVIDER_X509_CERT_URL,
+      client_x509_cert_url: process.env.FIREBASE_CLIENT_X509_CERT_URL,
+    }),
+  })
+  console.log("🔥 Firebase Admin SDK initialized.")
+} else {
+  console.log("🔥 Firebase Admin SDK already initialized.")
+}
+
+const auth = admin.auth()
+const firestore = admin.firestore()
+
 // Get Firebase Auth instance
 const getFirebaseAuth = () => {
   const app = initializeFirebase()
@@ -81,7 +105,6 @@ const verifyFirebaseToken = async (idToken) => {
   try {
     console.log("🔍 Verifying Firebase token...")
 
-    const auth = getFirebaseAuth()
     const decodedToken = await auth.verifyIdToken(idToken)
 
     console.log("✅ Firebase token verified successfully:", {
@@ -111,7 +134,6 @@ const verifyFirebaseToken = async (idToken) => {
 // Create custom token for user
 const createCustomToken = async (uid, additionalClaims = {}) => {
   try {
-    const auth = getFirebaseAuth()
     const customToken = await auth.createCustomToken(uid, additionalClaims)
     return {
       success: true,
@@ -129,7 +151,6 @@ const createCustomToken = async (uid, additionalClaims = {}) => {
 // Get user by phone number
 const getUserByPhone = async (phoneNumber) => {
   try {
-    const auth = getFirebaseAuth()
     const userRecord = await auth.getUserByPhoneNumber(phoneNumber)
     return {
       success: true,
@@ -163,7 +184,6 @@ const getUserByPhone = async (phoneNumber) => {
 // Create user with phone number
 const createUserWithPhone = async (phoneNumber, additionalData = {}) => {
   try {
-    const auth = getFirebaseAuth()
     const userRecord = await auth.createUser({
       phoneNumber: phoneNumber,
       displayName: additionalData.displayName,
@@ -193,7 +213,6 @@ const createUserWithPhone = async (phoneNumber, additionalData = {}) => {
 // Update user data
 const updateUser = async (uid, updateData) => {
   try {
-    const auth = getFirebaseAuth()
     const userRecord = await auth.updateUser(uid, updateData)
     return {
       success: true,
@@ -217,7 +236,6 @@ const updateUser = async (uid, updateData) => {
 // Delete user
 const deleteUser = async (uid) => {
   try {
-    const auth = getFirebaseAuth()
     await auth.deleteUser(uid)
     return {
       success: true,
@@ -262,6 +280,8 @@ const getFirebaseStatus = () => {
 }
 
 module.exports = {
+  auth,
+  firestore,
   initializeFirebase,
   getFirebaseAuth,
   verifyFirebaseToken,

@@ -4,60 +4,22 @@ const tenantConnections = {}
 
 const getTenantDB = async (tenantId) => {
   if (tenantConnections[tenantId]) {
-    console.log(`♻️ Reusing existing connection for tenant: ${tenantId}`)
     return tenantConnections[tenantId]
   }
 
+  const uri = process.env.TENANT_DB_URI.replace("<tenantId>", tenantId)
   try {
-    const dbUri = process.env.TENANT_DB_URI
-      ? `${process.env.TENANT_DB_URI}${tenantId}`
-      : `mongodb://127.0.0.1:27017/yesp_${tenantId}`
-
-    console.log(`🔌 Creating new DB connection for tenant: ${tenantId}`)
-    console.log(`📍 DB URI: ${dbUri}`)
-
-    const connection = await mongoose.createConnection(dbUri, {
+    const connection = await mongoose.createConnection(uri, {
       useNewUrlParser: true,
       useUnifiedTopology: true,
-      maxPoolSize: 10,
-      serverSelectionTimeoutMS: 60000,
-      socketTimeoutMS: 60000,
-    }).asPromise() // ✅ Ensures connection is ready before continuing
-
-    // Handle connection events
-    connection.on("connected", () => {
-      console.log(`✅ Tenant DB Connected: ${tenantId}`)
     })
-
-    connection.on("error", (err) => {
-      console.error(`❌ Tenant DB Error for ${tenantId}:`, err)
-    })
-
-    connection.on("disconnected", () => {
-      console.log(`🔌 Tenant DB Disconnected: ${tenantId}`)
-      delete tenantConnections[tenantId]
-    })
-
     tenantConnections[tenantId] = connection
+    console.log(`✅ Tenant DB connected: ${tenantId}`)
     return connection
   } catch (error) {
-    console.error(`❌ Tenant DB Connection Error for ${tenantId}:`, error)
-    throw error
+    console.error(`❌ Error connecting to tenant DB ${tenantId}:`, error)
+    throw new Error(`Failed to connect to tenant database: ${error.message}`)
   }
 }
 
-const closeTenantDB = async (tenantId) => {
-  if (tenantConnections[tenantId]) {
-    await tenantConnections[tenantId].close()
-    delete tenantConnections[tenantId]
-    console.log(`🔒 Closed tenant DB connection: ${tenantId}`)
-  }
-}
-
-const closeAllTenantDBs = async () => {
-  const promises = Object.keys(tenantConnections).map((tenantId) => closeTenantDB(tenantId))
-  await Promise.all(promises)
-  console.log("🔒 All tenant DB connections closed")
-}
-
-module.exports = { getTenantDB, closeTenantDB, closeAllTenantDBs }
+module.exports = { getTenantDB }

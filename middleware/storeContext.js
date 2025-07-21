@@ -1,84 +1,35 @@
 const { getTenantDB } = require("../config/tenantDB")
-const User = require("../models/User")
+const SettingsModel = require("../models/tenant/Settings") // Use the function to get the model
 
-const storeContextMiddleware = async (req, res, next) => {
+// This middleware fetches store settings based on the tenantId derived from the subdomain.
+// It makes the store settings available in req.storeSettings.
+const storeContext = async (req, res, next) => {
+  const tenantId = req.tenantId // From subdomain middleware
+
+  if (!tenantId) {
+    // If no tenantId (e.g., main domain), proceed without store context
+    req.storeSettings = null
+    return next()
+  }
+
   try {
-    const { storeId } = req.params // Get storeId from URL path
+    const tenantDB = await getTenantDB(tenantId)
+    const Settings = SettingsModel(tenantDB)
+    const settings = await Settings.findOne({}) // Assuming one settings document per tenant
 
-    if (!storeId) {
-      console.error("❌ storeContextMiddleware: Missing storeId in URL parameters")
-      return res.status(400).json({ error: "Store ID is required in the URL path." })
+    if (!settings) {
+      // If no settings found for the tenant, you might want to redirect or show a specific page
+      console.warn(`No settings found for tenant: ${tenantId}`)
+      req.storeSettings = null // Or handle as an error
+      return res.status(404).json({ error: "Store not found or not configured." })
     }
 
-    console.log(`🔍 Store context middleware - Processing request for store ID: ${storeId}`)
-
-    // Find main user by store ID to get tenant ID - try both cases
-    let mainUser = await User.findOne({ storeId: storeId.toUpperCase() })
-
-    // If not found with uppercase, try original case
-    if (!mainUser) {
-      mainUser = await User.findOne({ storeId: storeId })
-      console.log(`🔍 Trying original case store ID: ${storeId}`)
-    }
-
-    if (!mainUser) {
-      console.error(`❌ Store not found: ${storeId} (tried uppercase and original case)`)
-      return res.status(404).json({
-        error: "Store not found",
-        storeId: storeId,
-        help: "Please check if the store ID is correct in the URL.",
-      })
-    }
-
-    console.log(`✅ Found main user for store: ${storeId}, tenant: ${mainUser.tenantId}`)
-
-    // Get tenant DB connection
-    const tenantDB = await getTenantDB(mainUser.tenantId)
-
-    if (!tenantDB) {
-      console.error(`❌ Failed to get tenant DB for: ${mainUser.tenantId}`)
-      return res.status(500).json({ error: "Database connection failed" })
-    }
-
-    console.log(`✅ Tenant DB connected: ${mainUser.tenantId}`)
-
-    // Get tenant user data to retrieve storeInfo
-    const TenantUser = require("../models/tenant/User")(tenantDB)
-    const tenantUser = await TenantUser.findOne({ email: mainUser.email })
-
-    if (!tenantUser) {
-      console.error(`❌ Tenant user not found for: ${mainUser.email}`)
-      return res.status(404).json({ error: "Store user data not found" })
-    }
-
-    if (!tenantUser.hasStore) {
-      console.error(`❌ Store not active for: ${storeId}`)
-      return res.status(404).json({ error: "Store not active or not fully set up." })
-    }
-
-    console.log(`✅ Store validation passed for: ${storeId}`)
-
-    // Set tenant info for all subsequent routes
-    req.tenantId = mainUser.tenantId
-    req.storeId = mainUser.storeId || storeId // Use the actual storeId from DB if available
-    req.storeInfo = tenantUser.storeInfo
-    req.tenantDB = tenantDB
-
-    console.log(`🔗 Request context set by storeContextMiddleware:`, {
-      tenantId: req.tenantId,
-      storeId: req.storeId,
-      storeName: req.storeInfo?.name,
-      dbState: req.tenantDB?.readyState,
-    })
-
+    req.storeSettings = settings
     next()
   } catch (error) {
-    console.error("❌ Store context middleware error:", error)
-    res.status(500).json({
-      error: "Store configuration error",
-      details: error.message,
-    })
+    console.error(`Error fetching store context for tenant ${tenantId}:`, error)
+    res.status(500).json({ error: "Failed to load store context." })
   }
 }
 
-module.exports = storeContextMiddleware
+module.exports = storeContext

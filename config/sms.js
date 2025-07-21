@@ -43,11 +43,8 @@ const sendSMS = async (phone, message) => {
       }
 
       try {
-        const response = await axios.post(fast2smsUrl, payload, {
-          headers: {
-            "Content-Type": "application/json",
-          },
-          timeout: 15000, // 15 second timeout
+        const response = await axios.get(fast2smsUrl, {
+          params: payload,
         })
 
         console.log(`📱 Fast2SMS response status:`, response.status)

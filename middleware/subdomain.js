@@ -1,111 +1,35 @@
-// This file is no longer used for the new API structure.
-// It is kept here for reference but is effectively deprecated.
-const { getTenantDB } = require("../config/tenantDB")
-const User = require("../models/User")
+const subdomain = require("express-subdomain")
 
-const subdomainMiddleware = async (req, res, next) => {
-  try {
-    const host = req.get("host")
-    const parts = host.split(".")
+// This middleware is designed to handle dynamic subdomains for multi-tenant applications.
+// It captures the subdomain and makes it available in req.tenantId.
+// For example, if the request is to 'store1.yourdomain.com', req.tenantId will be 'store1'.
+// It also ensures that requests to 'www.yourdomain.com' or 'yourdomain.com' are treated as main app requests.
 
-    console.log(`🌐 Subdomain middleware - Host: ${host}, Parts: ${JSON.stringify(parts)}`)
+const subdomainMiddleware = (req, res, next) => {
+  const host = req.hostname
+  const parts = host.split(".")
 
-    // Skip subdomain processing for main domain or localhost without subdomain
-    if (parts.length < 2 || parts[0] === "localhost" || parts[0] === host) {
-      console.log("⏭️ Skipping subdomain processing - main domain")
-      return next()
-    }
-
-    const storeId = parts[0].toUpperCase() // Convert to uppercase for matching
-
-    // Only process for storefront routes
-    if (req.path.startsWith("/api/store")) {
-      // This path is now deprecated in server.js
-      console.log(`🔍 Processing storefront request for store ID: ${storeId}`)
-
-      try {
-        // Find main user by store ID to get tenant ID - try both cases
-        let mainUser = await User.findOne({ storeId: storeId })
-
-        // If not found with uppercase, try lowercase
-        if (!mainUser) {
-          const lowerStoreId = parts[0].toLowerCase()
-          mainUser = await User.findOne({ storeId: lowerStoreId })
-          console.log(`🔍 Trying lowercase store ID: ${lowerStoreId}`)
-        }
-
-        // If still not found, try original case
-        if (!mainUser) {
-          const originalStoreId = parts[0]
-          mainUser = await User.findOne({ storeId: originalStoreId })
-          console.log(`🔍 Trying original case store ID: ${originalStoreId}`)
-        }
-
-        if (!mainUser) {
-          console.error(`❌ Store not found: ${storeId} (tried uppercase, lowercase, and original case)`)
-          return res.status(404).json({
-            error: "Store not found",
-            storeId: storeId,
-            help: "Please check if the store ID is correct",
-          })
-        }
-
-        console.log(`✅ Found main user for store: ${storeId}, tenant: ${mainUser.tenantId}`)
-
-        // Get tenant DB and user data
-        const tenantDB = await getTenantDB(mainUser.tenantId)
-
-        if (!tenantDB) {
-          console.error(`❌ Failed to get tenant DB for: ${mainUser.tenantId}`)
-          return res.status(500).json({ error: "Database connection failed" })
-        }
-
-        console.log(`✅ Tenant DB connected: ${mainUser.tenantId}`)
-
-        const TenantUser = require("../models/tenant/User")(tenantDB)
-        const tenantUser = await TenantUser.findOne({ email: mainUser.email })
-
-        if (!tenantUser) {
-          console.error(`❌ Tenant user not found for: ${mainUser.email}`)
-          return res.status(404).json({ error: "Store user not found" })
-        }
-
-        if (!tenantUser.hasStore) {
-          console.error(`❌ Store not active for: ${storeId}`)
-          return res.status(404).json({ error: "Store not active" })
-        }
-
-        console.log(`✅ Store validation passed for: ${storeId}`)
-
-        // Set tenant info for storefront routes
-        req.tenantId = mainUser.tenantId
-        req.storeId = mainUser.storeId || storeId // Use the actual storeId from DB
-        req.storeInfo = tenantUser.storeInfo
-        req.tenantDB = tenantDB
-
-        console.log(`🔗 Request context set:`, {
-          tenantId: req.tenantId,
-          storeId: req.storeId,
-          storeName: req.storeInfo?.name,
-          dbState: req.tenantDB?.readyState,
-        })
-      } catch (dbError) {
-        console.error("❌ Database error in subdomain middleware:", dbError)
-        return res.status(500).json({
-          error: "Store configuration error",
-          details: dbError.message,
-        })
-      }
-    }
-
-    next()
-  } catch (error) {
-    console.error("❌ Subdomain middleware error:", error)
-    res.status(500).json({
-      error: "Store configuration error",
-      details: error.message,
-    })
+  // Check if it's localhost or a direct IP address
+  if (parts.length === 1 || (parts.length === 4 && parts.every((part) => !isNaN(Number.parseInt(part))))) {
+    req.tenantId = null // No subdomain for localhost or IP
+    return next()
   }
+
+  // Determine the base domain (e.g., 'yourdomain.com' from 'store1.yourdomain.com')
+  // This assumes a TLD like .com, .org, .net. For more complex TLDs (e.g., .co.uk),
+  // you might need a more sophisticated library like 'tldjs'.
+  const baseDomain = parts.slice(-2).join(".") // e.g., 'yourdomain.com'
+
+  // If the host is just the base domain (e.g., 'yourdomain.com' or 'www.yourdomain.com')
+  // or if it's 'localhost', treat it as the main application.
+  if (parts.length <= 2 || parts[0] === "www") {
+    req.tenantId = null // Main application
+  } else {
+    // The first part is the subdomain
+    req.tenantId = parts[0]
+  }
+
+  next()
 }
 
 module.exports = subdomainMiddleware

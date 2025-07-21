@@ -1,72 +1,50 @@
 const jwt = require("jsonwebtoken")
+const { getTenantDB } = require("../config/tenantDB")
+const CustomerModel = require("../models/tenant/Customer") // Use the function to get the model
 
-const customerAuthMiddleware = async (req, res, next) => {
-  try {
-    console.log("🔐 Customer auth middleware started")
+const protectCustomer = async (req, res, next) => {
+  let token
 
-    const token = req.header("Authorization")?.replace("Bearer ", "")
+  if (req.headers.authorization && req.headers.authorization.startsWith("Bearer")) {
+    try {
+      token = req.headers.authorization.split(" ")[1]
 
-    if (!token) {
-      console.log("❌ No customer token provided")
-      return res.status(401).json({ error: "Access denied. Please login." })
+      const decoded = jwt.verify(token, process.env.JWT_SECRET || "your-secret-key")
+
+      // Ensure tenantId is present in the decoded token
+      if (!decoded.tenantId) {
+        return res.status(401).json({ error: "Not authorized, tenant ID missing in token" })
+      }
+
+      // Get tenant DB connection
+      const tenantDB = await getTenantDB(decoded.tenantId)
+      const Customer = CustomerModel(tenantDB)
+
+      // Find customer in the tenant DB
+      const customer = await Customer.findById(decoded.customerId).select("-password")
+
+      if (!customer) {
+        return res.status(401).json({ error: "Not authorized, customer not found" })
+      }
+
+      req.customer = customer
+      req.tenantId = decoded.tenantId // Make tenantId available for customer routes
+      next()
+    } catch (error) {
+      console.error("Customer auth middleware error:", error)
+      if (error.name === "JsonWebTokenError") {
+        return res.status(401).json({ error: "Not authorized, invalid token" })
+      }
+      if (error.name === "TokenExpiredError") {
+        return res.status(401).json({ error: "Not authorized, token expired" })
+      }
+      res.status(401).json({ error: "Not authorized, token failed" })
     }
+  }
 
-    console.log("🔍 Customer token found, verifying...")
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || "your-secret-key")
-    console.log("✅ Customer token verified:", {
-      customerId: decoded.customerId,
-      email: decoded.email,
-      storeId: decoded.storeId,
-    })
-
-    // Verify store context: req.tenantDB and req.storeId should already be set by storeContextMiddleware
-    if (!req.tenantDB || !req.storeId) {
-      console.error("❌ Customer auth middleware: Missing store context (tenantDB or storeId).")
-      return res.status(500).json({ error: "Internal server error: Store context not available." })
-    }
-
-    // Crucial security check: Ensure the storeId in the token matches the storeId in the URL path
-    if (decoded.storeId !== req.storeId) {
-      console.error("❌ Customer auth middleware: Token storeId mismatch with URL storeId.", {
-        tokenStoreId: decoded.storeId,
-        urlStoreId: req.storeId,
-      })
-      return res.status(401).json({ error: "Access denied. Token is not valid for this store." })
-    }
-
-    // Get customer from tenant database
-    const Customer = require("../models/tenant/Customer")(req.tenantDB)
-    const customer = await Customer.findById(decoded.customerId)
-
-    if (!customer) {
-      console.log("❌ Customer not found for ID:", decoded.customerId)
-      return res.status(401).json({ error: "Invalid token - customer not found." })
-    }
-
-    console.log("✅ Customer found:", customer.email || customer.phone)
-
-    // Set customer info on request object
-    req.customer = customer
-    req.customerId = customer._id
-
-    console.log("✅ Customer auth middleware completed successfully")
-    next()
-  } catch (error) {
-    console.error("❌ Customer auth middleware error:", error)
-
-    // Provide more specific error messages
-    if (error.name === "JsonWebTokenError") {
-      return res.status(401).json({ error: "Invalid token format." })
-    }
-    if (error.name === "TokenExpiredError") {
-      return res.status(401).json({ error: "Session expired. Please login again." })
-    }
-
-    res.status(500).json({
-      error: "Authentication failed.",
-      details: process.env.NODE_ENV === "development" ? error.message : undefined,
-    })
+  if (!token) {
+    res.status(401).json({ error: "Not authorized, no token" })
   }
 }
 
-module.exports = customerAuthMiddleware
+module.exports = { protectCustomer }

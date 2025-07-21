@@ -3,17 +3,21 @@ const bcrypt = require("bcryptjs")
 
 const customerSchema = new mongoose.Schema(
   {
+    tenantId: { type: String, required: true }, // New field for tenantId
     name: {
       type: String,
       required: true,
     },
     email: {
       type: String,
-      required: false, // Made optional for phone-only registration
+      required: true, // Made required for email-only registration
+      unique: true, // Unique within the tenant's customer collection
+      lowercase: true,
+      trim: true,
     },
     phone: {
       type: String,
-      required: true,
+      required: false, // Made optional
       unique: true, // Ensure unique phone per tenant
     },
     password: {
@@ -73,9 +77,10 @@ const customerSchema = new mongoose.Schema(
       street: String,
       city: String,
       state: String,
-      pincode: String,
+      zip: String, // Updated field name from pincode to zip
       country: String,
     },
+    totalOrders: { type: Number, default: 0 }, // New field for totalOrders
     totalSpent: {
       type: Number,
       default: 0,
@@ -157,8 +162,8 @@ customerSchema.methods.updateSpent = function (amount) {
 customerSchema.methods.getFullAddress = function () {
   if (!this.address || !this.address.street) return null
 
-  const { street, city, state, pincode, country } = this.address
-  return `${street}, ${city}, ${state} ${pincode}${country ? `, ${country}` : ""}`
+  const { street, city, state, zip, country } = this.address
+  return `${street}, ${city}, ${state} ${zip}${country ? `, ${country}` : ""}`
 }
 
 customerSchema.methods.getDefaultAddress = function () {
@@ -230,4 +235,4 @@ customerSchema.statics.getTopCustomers = function (limit = 10) {
   return this.find({ isActive: true }).sort({ totalSpent: -1 }).limit(limit)
 }
 
-module.exports = (connection) => connection.model("Customer", customerSchema)
+module.exports = (connection) => connection.models.Customer || connection.model("Customer", customerSchema)

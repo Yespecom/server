@@ -130,7 +130,7 @@ router.get("/", async (req, res) => {
   try {
     console.log("💳 Fetching all payments...")
 
-    const Payment = req.PaymentModel
+    const Payment = req.tenantModels.Payment
 
     // Get query parameters for filtering
     const {
@@ -145,7 +145,7 @@ router.get("/", async (req, res) => {
     } = req.query
 
     // Build filter object
-    const filter = {}
+    const filter = { tenantId: req.user.tenantId }
 
     if (status && status !== "all") {
       filter.status = status
@@ -228,117 +228,18 @@ router.get("/", async (req, res) => {
   }
 })
 
-// Get payment statistics
-router.get("/stats/overview", async (req, res) => {
-  try {
-    console.log("📈 Fetching payment statistics...")
-
-    const Payment = req.PaymentModel
-
-    // Get payments by status
-    const statusStats = await Payment.aggregate([
-      {
-        $group: {
-          _id: "$status",
-          count: { $sum: 1 },
-          totalAmount: { $sum: "$amount" },
-        },
-      },
-    ])
-
-    // Get payments by method
-    const methodStats = await Payment.aggregate([
-      {
-        $group: {
-          _id: "$method",
-          count: { $sum: 1 },
-          totalAmount: { $sum: "$amount" },
-        },
-      },
-    ])
-
-    // Get daily revenue for last 30 days (successful payments only)
-    const thirtyDaysAgo = new Date()
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
-
-    const dailyRevenue = await Payment.aggregate([
-      {
-        $match: {
-          status: "success",
-          createdAt: { $gte: thirtyDaysAgo },
-        },
-      },
-      {
-        $group: {
-          _id: {
-            year: { $year: "$createdAt" },
-            month: { $month: "$createdAt" },
-            day: { $dayOfMonth: "$createdAt" },
-          },
-          revenue: { $sum: "$amount" },
-          count: { $sum: 1 },
-        },
-      },
-      {
-        $sort: { "_id.year": 1, "_id.month": 1, "_id.day": 1 },
-      },
-    ])
-
-    // Get hourly distribution for today
-    const today = new Date()
-    today.setHours(0, 0, 0, 0)
-    const tomorrow = new Date(today)
-    tomorrow.setDate(tomorrow.getDate() + 1)
-
-    const hourlyStats = await Payment.aggregate([
-      {
-        $match: {
-          createdAt: { $gte: today, $lt: tomorrow },
-        },
-      },
-      {
-        $group: {
-          _id: { $hour: "$createdAt" },
-          count: { $sum: 1 },
-          revenue: { $sum: { $cond: [{ $eq: ["$status", "success"] }, "$amount", 0] } },
-        },
-      },
-      {
-        $sort: { _id: 1 },
-      },
-    ])
-
-    const stats = {
-      statusBreakdown: statusStats,
-      methodBreakdown: methodStats,
-      dailyRevenue: dailyRevenue,
-      hourlyDistribution: hourlyStats,
-      generatedAt: new Date().toISOString(),
-    }
-
-    console.log("✅ Payment statistics fetched")
-    res.json(stats)
-  } catch (error) {
-    console.error("❌ Payment statistics error:", error)
-    res.status(500).json({
-      error: "Failed to fetch payment statistics",
-      details: error.message,
-    })
-  }
-})
-
 // Get payment details - MUST come after other specific routes
 router.get("/:id", async (req, res) => {
   try {
     console.log("🔍 Fetching payment details for ID:", req.params.id)
 
-    const Payment = req.PaymentModel
+    const Payment = req.tenantModels.Payment
 
     // Try to find by MongoDB _id first, then by paymentId
-    let payment = await Payment.findById(req.params.id)
+    let payment = await Payment.findById(req.params.id).populate("orderId").populate("customerId")
 
     if (!payment) {
-      payment = await Payment.findOne({ paymentId: req.params.id })
+      payment = await Payment.findOne({ paymentId: req.params.id }).populate("orderId").populate("customerId")
     }
 
     if (!payment) {
@@ -369,125 +270,173 @@ router.get("/:id", async (req, res) => {
   }
 })
 
-// Update payment status (admin action)
-router.put("/:id/status", async (req, res) => {
+// Create a new payment (e.g., for manual entry or reconciliation)
+router.post("/", async (req, res) => {
   try {
-    console.log("🔄 Updating payment status for ID:", req.params.id)
+    const Payment = req.tenantModels.Payment
+    const { orderId, customerId, amount, paymentMethod, transactionId, status, paymentDate, notes } = req.body
 
-    const { status, notes } = req.body
-    const validStatuses = ["pending", "success", "failed", "cancelled", "refunded"]
-
-    if (!status || !validStatuses.includes(status)) {
-      return res.status(400).json({
-        error: "Invalid status",
-        validStatuses,
-        provided: status,
-      })
+    if (!orderId || !customerId || !amount || !paymentMethod) {
+      return res.status(400).json({ error: "Missing required payment fields" })
     }
 
-    const Payment = req.PaymentModel
-
-    let payment = await Payment.findById(req.params.id)
-    if (!payment) {
-      payment = await Payment.findOne({ paymentId: req.params.id })
-    }
-
-    if (!payment) {
-      return res.status(404).json({ error: "Payment not found" })
-    }
-
-    const oldStatus = payment.status
-    payment.status = status
-
-    if (notes) {
-      if (!payment.gatewayResponse) {
-        payment.gatewayResponse = {}
-      }
-      payment.gatewayResponse.adminNotes = notes
-      payment.gatewayResponse.statusUpdatedAt = new Date()
-      payment.gatewayResponse.statusUpdatedBy = req.user?.email || "admin"
-    }
-
-    await payment.save()
-
-    console.log(`✅ Payment status updated: ${oldStatus} → ${status}`)
-
-    res.json({
-      message: "Payment status updated successfully",
-      payment: {
-        id: payment._id,
-        paymentId: payment.paymentId,
-        orderId: payment.orderId,
-        oldStatus,
-        newStatus: status,
-        updatedAt: payment.updatedAt,
-      },
+    const newPayment = new Payment({
+      tenantId: req.user.tenantId,
+      orderId,
+      customerId,
+      amount,
+      paymentMethod,
+      transactionId,
+      status,
+      paymentDate,
+      notes,
     })
+    await newPayment.save()
+    res.status(201).json(newPayment)
   } catch (error) {
-    console.error("❌ Update payment status error:", error)
-    res.status(500).json({
-      error: "Failed to update payment status",
-      details: error.message,
-    })
+    console.error("❌ Error creating payment:", error)
+    res.status(500).json({ error: "Failed to create payment" })
   }
 })
 
-// Export payments data (CSV format)
-router.get("/export/csv", async (req, res) => {
+// Update payment status or details
+router.put("/:id", async (req, res) => {
   try {
-    console.log("📊 Exporting payments to CSV...")
+    const Payment = req.tenantModels.Payment
+    const { amount, paymentMethod, transactionId, status, paymentDate, notes } = req.body
 
-    const { startDate, endDate, status, method } = req.query
-    const Payment = req.PaymentModel
+    const updatedPayment = await Payment.findByIdAndUpdate(
+      req.params.id,
+      { amount, paymentMethod, transactionId, status, paymentDate, notes },
+      { new: true, runValidators: true },
+    )
+    if (!updatedPayment) {
+      return res.status(404).json({ error: "Payment not found" })
+    }
+    res.json(updatedPayment)
+  } catch (error) {
+    console.error("❌ Error updating payment:", error)
+    res.status(500).json({ error: "Failed to update payment" })
+  }
+})
 
-    // Build filter
-    const filter = {}
-    if (status && status !== "all") filter.status = status
-    if (method && method !== "all") filter.method = method
-    if (startDate || endDate) {
-      filter.createdAt = {}
-      if (startDate) filter.createdAt.$gte = new Date(startDate)
-      if (endDate) {
-        const endDateTime = new Date(endDate)
-        endDateTime.setHours(23, 59, 59, 999)
-        filter.createdAt.$lte = endDateTime
-      }
+// Delete a payment (use with caution)
+router.delete("/:id", async (req, res) => {
+  try {
+    const Payment = req.tenantModels.Payment
+    const deletedPayment = await Payment.findByIdAndDelete(req.params.id)
+    if (!deletedPayment) {
+      return res.status(404).json({ error: "Payment not found" })
+    }
+    res.json({ message: "Payment deleted successfully" })
+  } catch (error) {
+    console.error("❌ Error deleting payment:", error)
+    res.status(500).json({ error: "Failed to delete payment" })
+  }
+})
+
+// Get payment statistics
+router.get("/stats/overview", async (req, res) => {
+  try {
+    console.log("📈 Fetching payment statistics...")
+
+    const Payment = req.tenantModels.Payment
+
+    // Get payments by status
+    const statusStats = await Payment.aggregate([
+      {
+        $match: { tenantId: req.user.tenantId },
+      },
+      {
+        $group: {
+          _id: "$status",
+          count: { $sum: 1 },
+          totalAmount: { $sum: "$amount" },
+        },
+      },
+    ])
+
+    // Get payments by method
+    const methodStats = await Payment.aggregate([
+      {
+        $match: { tenantId: req.user.tenantId },
+      },
+      {
+        $group: {
+          _id: "$method",
+          count: { $sum: 1 },
+          totalAmount: { $sum: "$amount" },
+        },
+      },
+    ])
+
+    // Get daily revenue for last 30 days (successful payments only)
+    const thirtyDaysAgo = new Date()
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
+
+    const dailyRevenue = await Payment.aggregate([
+      {
+        $match: {
+          status: "success",
+          createdAt: { $gte: thirtyDaysAgo },
+          tenantId: req.user.tenantId,
+        },
+      },
+      {
+        $group: {
+          _id: {
+            year: { $year: "$createdAt" },
+            month: { $month: "$createdAt" },
+            day: { $dayOfMonth: "$createdAt" },
+          },
+          revenue: { $sum: "$amount" },
+          count: { $sum: 1 },
+        },
+      },
+      {
+        $sort: { "_id.year": 1, "_id.month": 1, "_id.day": 1 },
+      },
+    ])
+
+    // Get hourly distribution for today
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    const tomorrow = new Date(today)
+    tomorrow.setDate(tomorrow.getDate() + 1)
+
+    const hourlyStats = await Payment.aggregate([
+      {
+        $match: {
+          createdAt: { $gte: today, $lt: tomorrow },
+          tenantId: req.user.tenantId,
+        },
+      },
+      {
+        $group: {
+          _id: { $hour: "$createdAt" },
+          count: { $sum: 1 },
+          revenue: { $sum: { $cond: [{ $eq: ["$status", "success"] }, "$amount", 0] } },
+        },
+      },
+      {
+        $sort: { _id: 1 },
+      },
+    ])
+
+    const stats = {
+      statusBreakdown: statusStats,
+      methodBreakdown: methodStats,
+      dailyRevenue: dailyRevenue,
+      hourlyDistribution: hourlyStats,
+      generatedAt: new Date().toISOString(),
     }
 
-    const payments = await Payment.find(filter)
-      .sort({ createdAt: -1 })
-      .limit(10000) // Limit for performance
-      .lean()
-
-    // Generate CSV content
-    const csvHeaders = ["Payment ID", "Order ID", "Amount", "Status", "Method", "Created At", "Updated At"].join(",")
-
-    const csvRows = payments.map((payment) =>
-      [
-        payment.paymentId || payment._id,
-        payment.orderId || "",
-        payment.amount || 0,
-        payment.status || "",
-        payment.method || "",
-        payment.createdAt ? new Date(payment.createdAt).toISOString() : "",
-        payment.updatedAt ? new Date(payment.updatedAt).toISOString() : "",
-      ].join(","),
-    )
-
-    const csvContent = [csvHeaders, ...csvRows].join("\n")
-
-    res.setHeader("Content-Type", "text/csv")
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="payments-export-${new Date().toISOString().split("T")[0]}.csv"`,
-    )
-    res.send(csvContent)
-
-    console.log(`✅ Exported ${payments.length} payments to CSV`)
+    console.log("✅ Payment statistics fetched")
+    res.json(stats)
   } catch (error) {
-    console.error("❌ Export payments error:", error)
+    console.error("❌ Payment statistics error:", error)
     res.status(500).json({
-      error: "Failed to export payments",
+      error: "Failed to fetch payment statistics",
       details: error.message,
     })
   }

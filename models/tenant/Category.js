@@ -1,22 +1,16 @@
 const mongoose = require("mongoose")
 
-const categorySchema = new mongoose.Schema(
-  {
-    name: {
-      type: String,
-      required: true,
-      trim: true,
+module.exports = (connection) => {
+  const categorySchema = new mongoose.Schema(
+    {
+      tenantId: { type: String, required: true },
+      name: { type: String, required: true, unique: true }, // Unique within the tenant
+      description: { type: String },
+      imageUrl: { type: String },
+      isActive: { type: Boolean, default: true },
     },
-    description: String,
-    image: String,
-    isActive: {
-      type: Boolean,
-      default: true,
-    },
-  },
-  {
-    timestamps: true,
-  },
-)
+    { timestamps: true },
+  )
 
-module.exports = (connection) => connection.model("Category", categorySchema)
+  return connection.models.Category || connection.model("Category", categorySchema)
+}

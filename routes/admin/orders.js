@@ -1,57 +1,75 @@
 const express = require("express")
 const router = express.Router()
 
-// Get all orders
+// Assuming req.tenantModels.Order and req.tenantModels.Customer are available
+// and authMiddleware has already run for admin routes
+
+// Get all orders for the tenant
 router.get("/", async (req, res) => {
   try {
-    const Order = require("../../models/tenant/Order")(req.tenantDB)
-    const orders = await Order.find().populate("items.product").sort({ createdAt: -1 })
+    const Order = req.tenantModels.Order
+    const orders = await Order.find({ tenantId: req.user.tenantId }).populate("customerId") // Populate customer details
     res.json(orders)
   } catch (error) {
-    res.status(500).json({ error: error.message })
+    console.error("❌ Error fetching orders:", error)
+    res.status(500).json({ error: "Failed to fetch orders" })
   }
 })
 
-// Get specific order
+// Get a single order by ID
 router.get("/:id", async (req, res) => {
   try {
-    const Order = require("../../models/tenant/Order")(req.tenantDB)
-    const order = await Order.findById(req.params.id).populate("items.product")
-
+    const Order = req.tenantModels.Order
+    const order = await Order.findById(req.params.id).populate("customerId").populate("products.productId")
     if (!order) {
       return res.status(404).json({ error: "Order not found" })
     }
-
     res.json(order)
   } catch (error) {
-    res.status(500).json({ error: error.message })
+    console.error("❌ Error fetching order by ID:", error)
+    res.status(500).json({ error: "Failed to fetch order" })
   }
 })
 
 // Update order status
-router.put("/:id", async (req, res) => {
+router.put("/:id/status", async (req, res) => {
   try {
-    const Order = require("../../models/tenant/Order")(req.tenantDB)
-    const { status } = req.body
-
-    // Validate status
-    const validStatuses = ["pending", "confirmed", "processing", "shipped", "delivered", "cancelled"]
-    if (!validStatuses.includes(status)) {
-      return res.status(400).json({
-        error: "Invalid status",
-        validStatuses,
-      })
+    const Order = req.tenantModels.Order
+    const { status, paymentStatus } = req.body
+    if (!status && !paymentStatus) {
+      return res.status(400).json({ error: "Status or paymentStatus is required" })
     }
 
-    const order = await Order.findByIdAndUpdate(req.params.id, { status }, { new: true }).populate("items.product")
+    const updateFields = {}
+    if (status) updateFields.status = status
+    if (paymentStatus) updateFields.paymentStatus = paymentStatus
 
-    if (!order) {
+    const updatedOrder = await Order.findByIdAndUpdate(req.params.id, updateFields, {
+      new: true,
+      runValidators: true,
+    })
+    if (!updatedOrder) {
       return res.status(404).json({ error: "Order not found" })
     }
-
-    res.json(order)
+    res.json(updatedOrder)
   } catch (error) {
-    res.status(500).json({ error: error.message })
+    console.error("❌ Error updating order status:", error)
+    res.status(500).json({ error: "Failed to update order status" })
+  }
+})
+
+// Delete an order by ID (use with caution)
+router.delete("/:id", async (req, res) => {
+  try {
+    const Order = req.tenantModels.Order
+    const deletedOrder = await Order.findByIdAndDelete(req.params.id)
+    if (!deletedOrder) {
+      return res.status(404).json({ error: "Order not found" })
+    }
+    res.json({ message: "Order deleted successfully" })
+  } catch (error) {
+    console.error("❌ Error deleting order:", error)
+    res.status(500).json({ error: "Failed to delete order" })
   }
 })
 

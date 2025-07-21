@@ -1,40 +1,45 @@
 const mongoose = require("mongoose")
 
-const settingsSchema = new mongoose.Schema(
-  {
-    general: {
-      storeName: String,
-      logo: String,
-      banner: String,
-      tagline: String,
-      supportEmail: String,
-      supportPhone: String,
-    },
-    payment: {
-      razorpayKeyId: String,
-      razorpayKeySecret: String,
-      stripePublicKey: String,
-      stripeSecretKey: String,
-      codEnabled: {
-        type: Boolean,
-        default: true,
+module.exports = (connection) => {
+  const settingsSchema = new mongoose.Schema(
+    {
+      tenantId: { type: String, required: true, unique: true },
+      general: {
+        storeName: { type: String, required: true },
+        logoUrl: { type: String },
+        banner: String,
+        tagline: String,
+        contactEmail: { type: String },
+        contactPhone: { type: String },
+        address: {
+          street: String,
+          city: String,
+          state: String,
+          zip: String,
+          country: String,
+        },
+        currency: { type: String, default: "USD" },
       },
+      payment: {
+        razorpayKeyId: String,
+        razorpayKeySecret: String,
+        stripePublicKey: String,
+        stripeSecretKey: String,
+        codEnabled: {
+          type: Boolean,
+          default: true,
+        },
+      },
+      socialLinks: {
+        facebook: String,
+        instagram: String,
+        twitter: String,
+      },
+      shippingPolicy: String,
+      returnPolicy: String,
     },
-    social: {
-      instagram: String,
-      whatsapp: String,
-      facebook: String,
-    },
-    shipping: {
-      deliveryTime: String,
-      charges: Number,
-      freeShippingAbove: Number,
-      availabilityArea: [String],
-    },
-  },
-  {
-    timestamps: true,
-  },
-)
+    { timestamps: true },
+  )
 
-module.exports = (connection) => connection.model("Settings", settingsSchema)
+  return connection.models.Settings || connection.model("Settings", settingsSchema)
+}

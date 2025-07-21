@@ -1,17 +1,20 @@
 const express = require("express")
 const cors = require("cors")
 const path = require("path")
-const { getMainDb } = require("./db/connection") // Updated import
-const { closeAllTenantDBs } = require("./config/tenantDB") // Import for graceful shutdown
-const multer = require("multer") // Assuming multer is used for file uploads
+const mongoose = require("mongoose") // Import mongoose for graceful shutdown of main connection
+const multer = require("multer") // For handling file uploads
 
-// Load environment variables (if not already loaded by dotenv.config() in main app)
+// Load environment variables
 require("dotenv").config()
 
 const app = express()
 const PORT = process.env.PORT || 5000
 
-// Connect to Main DB at startup
+// Database connections
+const { getMainDb } = require("./db/connection")
+const { closeAllTenantDBs } = require("./config/tenantDB")
+
+// Connect to main database at startup
 getMainDb()
 
 // Middleware
@@ -42,14 +45,15 @@ app.use("/uploads", express.static("uploads")) // Serve static files from 'uploa
 
 // Import routes
 const authRoutes = require("./routes/auth")
-const adminRoutes = require("./routes/admin")
-const storeRoutes = require("./routes/store")
+const adminRoutes = require("./routes/admin") // This should be the main admin router (index.js)
+const storeRoutes = require("./routes/store") // This should be the main store router (index.js)
 const otpRoutes = require("./routes/otp")
 const passwordResetRoutes = require("./routes/password-reset")
 
-// Import middleware (if needed, though some are applied directly in routes)
+// Import middleware
 const authMiddleware = require("./middleware/auth")
 const storeContextMiddleware = require("./middleware/storeContext")
+const subdomainMiddleware = require("./middleware/subdomain") // Assuming this is needed globally
 
 // Add detailed logging middleware - BEFORE route registration
 app.use((req, res, next) => {
@@ -62,7 +66,6 @@ app.use((req, res, next) => {
     authorization: req.get("authorization") ? "Bearer ***" : "None",
     "content-type": req.get("content-type"),
   })
-
   next()
 })
 
@@ -79,12 +82,11 @@ app.use((req, res, next) => {
     console.log(`✅ Should be handled by OTP routes`)
   } else if (path.startsWith("/api/password-reset")) {
     console.log(`✅ Should be handled by password reset routes`)
-  } else if (path.match(/^\/api\/[A-Z0-9]{6}$/i)) {
+  } else if (path.match(/^\/api\/[A-Z0-9]{6}/i)) {
     console.log(`✅ Looks like a store route with storeId: ${path.split("/")[2]}`)
   } else {
     console.log(`⚠️ Unknown route pattern: ${path}`)
   }
-
   next()
 })
 
@@ -99,6 +101,9 @@ app.get("/health", (req, res) => {
     environment: process.env.NODE_ENV || "development",
   })
 })
+
+// Apply subdomain middleware globally if needed, or specifically to store routes
+app.use(subdomainMiddleware) // Assuming this needs to run for all requests to determine tenant
 
 // Authentication routes (must come before store routes)
 app.use(
@@ -142,19 +147,19 @@ app.use(
     console.log("👑 Method:", req.method)
     next()
   },
-  authMiddleware,
-  adminRoutes,
+  authMiddleware, // Apply auth middleware for admin routes
+  adminRoutes, // This is the express.Router() from routes/admin/index.js
 )
 console.log("✅ Admin routes registered at /api/admin")
 
 // CRITICAL FIX: Add a catch-all middleware to prevent admin routes from falling through
+// This is a safety net, ideally, adminRoutes should handle all its paths.
 app.use("/api/admin/*", (req, res, next) => {
   console.log("❌ CRITICAL: Admin route fell through to catch-all handler")
   console.log("❌ This means the admin route didn't send a response")
   console.log("❌ URL:", req.originalUrl)
   console.log("❌ Method:", req.method)
 
-  // If we reach here, it means the admin route didn't handle the request properly
   if (!res.headersSent) {
     return res.status(500).json({
       error: "Admin route handler failed",
@@ -193,7 +198,7 @@ app.use(
     }
 
     // IMPORTANT: Skip store middleware for known non-store routes
-    const nonStoreRoutes = ["auth", "admin", "otp", "password-reset", "health", "user"]
+    const nonStoreRoutes = ["auth", "admin", "otp", "password-reset", "health", "user"] // 'user' might be a specific main user route
 
     if (nonStoreRoutes.includes(storeId)) {
       console.log(`❌ Route ${storeId} should NOT reach store handler - this indicates a routing problem`)
@@ -221,9 +226,9 @@ app.use(
 
     // Apply store context middleware for actual store routes
     console.log(`🛍️ Applying store context middleware for store: ${storeId}`)
-    storeContextMiddleware(req, res, next)
+    storeContextMiddleware(req, res, next) // This middleware should set req.tenantDb
   },
-  storeRoutes,
+  storeRoutes, // This is the express.Router() from routes/store.js
 )
 console.log("✅ Store routes registered at /api/:storeId with context middleware")
 
@@ -250,7 +255,7 @@ app.use((err, req, res, next) => {
   }
 
   // Handle other errors
-  res.status(500).json({
+  res.status(err.statusCode || 500).json({
     error: "Something went wrong!",
     details: process.env.NODE_ENV === "development" ? err.message : undefined,
   })

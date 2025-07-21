@@ -1,46 +1,60 @@
 const express = require("express")
 const OTP = require("../models/OTP")
-const User = require("../models/User")
 const { sendOTPEmail } = require("../config/email")
+const { sendSMS } = require("../config/sms") // Assuming you might want to send OTP via SMS too
+
 const router = express.Router()
 
-// Send OTP
+// Send OTP for various purposes (e.g., general verification, not specific to auth/password-reset)
 router.post("/send", async (req, res) => {
   try {
-    const { email, purpose = "registration" } = req.body
+    const { email, phoneNumber, purpose } = req.body
 
-    if (!email) {
-      return res.status(400).json({ error: "Email is required" })
+    console.log(`🔢 Send OTP request for: ${email || phoneNumber}, Purpose: ${purpose}`)
+
+    if (!email && !phoneNumber) {
+      return res.status(400).json({ error: "Email or phone number is required" })
+    }
+    if (!purpose) {
+      return res.status(400).json({ error: "Purpose is required" })
     }
 
-    // Validate email format
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
-    if (!emailRegex.test(email)) {
-      return res.status(400).json({ error: "Invalid email format" })
+    // Basic rate limiting
+    const recentOTP = await OTP.findOne({
+      $or: [{ email }, { phoneNumber }], // Assuming OTP model can store phone numbers too
+      purpose,
+      createdAt: { $gt: new Date(Date.now() - 60 * 1000) }, // Last 1 minute
+    })
+
+    if (recentOTP) {
+      return res.status(429).json({
+        error: "Please wait 1 minute before requesting a new OTP",
+      })
     }
 
-    // Check if user exists based on purpose
-    const existingUser = await User.findOne({ email })
-
-    if (purpose === "registration" && existingUser) {
-      return res.status(400).json({ error: "User already exists with this email" })
+    let otpCode
+    if (email) {
+      otpCode = await OTP.createOTP(email, purpose)
+      await sendOTPEmail(email, otpCode, purpose)
+      console.log(`✅ OTP email sent for ${email}, purpose: ${purpose}`)
     }
 
-    if ((purpose === "login" || purpose === "password_reset") && !existingUser) {
-      return res.status(404).json({ error: "User not found with this email" })
+    if (phoneNumber) {
+      // You might need to adjust OTP.createOTP to handle phone numbers if not already
+      // For simplicity, reusing the same OTP generation logic.
+      if (!otpCode) {
+        otpCode = await OTP.createOTP(phoneNumber, purpose) // Assuming email field can store phone for OTP model
+      }
+      const smsResult = await sendSMS(phoneNumber, `Your ${purpose} OTP is: ${otpCode}`)
+      if (!smsResult.success) {
+        console.warn(`⚠️ Failed to send SMS OTP to ${phoneNumber}: ${smsResult.message}`)
+      } else {
+        console.log(`✅ OTP SMS sent for ${phoneNumber}, purpose: ${purpose}`)
+      }
     }
-
-    // Generate and save OTP
-    const otp = await OTP.createOTP(email, purpose)
-    console.log(`🔢 Generated OTP for ${email}: ${otp} (Purpose: ${purpose})`)
-
-    // Send OTP via email
-    await sendOTPEmail(email, otp, purpose)
 
     res.json({
-      message: "OTP sent successfully to your email",
-      email,
-      purpose,
+      message: "OTP sent successfully",
       expiresIn: "10 minutes",
     })
   } catch (error) {
@@ -52,107 +66,29 @@ router.post("/send", async (req, res) => {
 // Verify OTP
 router.post("/verify", async (req, res) => {
   try {
-    const { email, otp, purpose = "registration" } = req.body
+    const { email, phoneNumber, otp, purpose } = req.body
 
-    if (!email || !otp) {
-      return res.status(400).json({ error: "Email and OTP are required" })
+    console.log(`🔍 Verify OTP request for: ${email || phoneNumber}, OTP: ${otp}, Purpose: ${purpose}`)
+
+    if ((!email && !phoneNumber) || !otp || !purpose) {
+      return res.status(400).json({ error: "Email/phone, OTP, and purpose are required" })
     }
 
-    // Verify OTP
-    const verification = await OTP.verifyOTP(email, otp, purpose)
+    const identifier = email || phoneNumber // Use email or phone as identifier for OTP lookup
 
-    if (!verification.success) {
-      return res.status(400).json({ error: verification.message })
+    const otpDoc = await OTP.verifyOTP(identifier, otp, purpose)
+
+    if (!otpDoc) {
+      console.log(`❌ Invalid or expired OTP for ${identifier}, purpose: ${purpose}`)
+      return res.status(400).json({ error: "Invalid or expired OTP" })
     }
-
-    console.log(`✅ OTP verified for ${email} (Purpose: ${purpose})`)
 
     res.json({
-      message: verification.message,
+      message: "OTP verified successfully",
       verified: true,
-      email,
-      purpose,
     })
   } catch (error) {
     console.error("❌ Verify OTP error:", error)
-    res.status(500).json({ error: error.message })
-  }
-})
-
-// Resend OTP
-router.post("/resend", async (req, res) => {
-  try {
-    const { email, purpose = "registration" } = req.body
-
-    if (!email) {
-      return res.status(400).json({ error: "Email is required" })
-    }
-
-    // Check rate limiting (optional)
-    const recentOTP = await OTP.findOne({
-      email,
-      purpose,
-      createdAt: { $gt: new Date(Date.now() - 60 * 1000) }, // Last 1 minute
-    })
-
-    if (recentOTP) {
-      return res.status(429).json({
-        error: "Please wait 1 minute before requesting a new OTP",
-      })
-    }
-
-    // Generate and send new OTP
-    const otp = await OTP.createOTP(email, purpose)
-    console.log(`🔄 Resent OTP for ${email}: ${otp} (Purpose: ${purpose})`)
-
-    await sendOTPEmail(email, otp, purpose)
-
-    res.json({
-      message: "New OTP sent successfully",
-      email,
-      purpose,
-      expiresIn: "10 minutes",
-    })
-  } catch (error) {
-    console.error("❌ Resend OTP error:", error)
-    res.status(500).json({ error: error.message })
-  }
-})
-
-// Get OTP status (for debugging - remove in production)
-router.get("/status/:email", async (req, res) => {
-  try {
-    if (process.env.NODE_ENV === "production") {
-      return res.status(404).json({ error: "Not found" })
-    }
-
-    const { email } = req.params
-    const { purpose = "registration" } = req.query
-
-    const otpDoc = await OTP.findOne({
-      email,
-      purpose,
-      isUsed: false,
-    }).select("otp attempts expiresAt createdAt")
-
-    if (!otpDoc) {
-      return res.json({ message: "No active OTP found" })
-    }
-
-    const isExpired = otpDoc.expiresAt < new Date()
-
-    res.json({
-      email,
-      purpose,
-      otp: otpDoc.otp, // Remove this in production!
-      attempts: otpDoc.attempts,
-      expiresAt: otpDoc.expiresAt,
-      createdAt: otpDoc.createdAt,
-      isExpired,
-      timeRemaining: isExpired ? 0 : Math.max(0, Math.floor((otpDoc.expiresAt - new Date()) / 1000)),
-    })
-  } catch (error) {
-    console.error("❌ OTP status error:", error)
     res.status(500).json({ error: error.message })
   }
 })

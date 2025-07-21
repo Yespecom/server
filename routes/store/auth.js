@@ -2,6 +2,12 @@ const express = require("express")
 const jwt = require("jsonwebtoken")
 const bcrypt = require("bcryptjs")
 const rateLimit = require("express-rate-limit")
+const { sendOTPEmail } = require("../../config/email")
+const OTP = require("../../models/OTP") // Main OTP model
+const CustomerOTP = require("../../models/CustomerOTP") // Deprecated CustomerOTP model
+const { getTenantDB } = require("../../config/tenantDB")
+const TenantUser = require("../../models/tenant/User") // Tenant User model for customers
+
 const router = express.Router({ mergeParams: true })
 
 // Rate limiting for authentication endpoints
@@ -186,293 +192,210 @@ router.post("/debug/fix-password", async (req, res) => {
   }
 })
 
-// Enhanced customer registration
+// Customer registration for a specific tenant store
 router.post("/register", async (req, res) => {
   try {
-    const { name, email, password, phone, acceptTerms } = req.body
+    const { email, password, name, phone } = req.body
+    const tenantId = req.tenantId // From storeContextMiddleware
 
-    console.log(`📝 Customer registration for store: ${req.storeId}, email: ${email}`)
+    console.log(`📝 Customer register request for: ${email} on tenant: ${tenantId}`)
 
-    // Enhanced validation
-    const errors = []
-
-    if (!name || name.trim().length < 2) {
-      errors.push("Name must be at least 2 characters long")
+    if (!email || !password || !tenantId) {
+      return res.status(400).json({ error: "Email, password, and tenant ID are required" })
+    }
+    if (password.length < 6) {
+      return res.status(400).json({ error: "Password must be at least 6 characters long" })
     }
 
-    if (!email || !validateEmail(email)) {
-      errors.push("Valid email address is required")
-    }
+    const tenantDbConnection = await getTenantDB(tenantId)
+    const CustomerModel = TenantUser(tenantDbConnection) // Use TenantUser model for customers
 
-    if (!password || password.length < 6) {
-      errors.push("Password must be at least 6 characters long")
-    }
-
-    if (phone && !validatePhone(phone)) {
-      errors.push("Valid phone number is required")
-    }
-
-    if (errors.length > 0) {
-      return res.status(400).json({
-        error: "Validation failed",
-        details: errors,
-      })
-    }
-
-    if (!req.models) {
-      console.error("❌ Models not initialized")
-      return res.status(500).json({ error: "Database models not initialized" })
-    }
-
-    const { Customer } = req.models
-
-    // Check for existing customer
-    const existingCustomer = await Customer.findOne({
-      $or: [{ email: email.toLowerCase() }, ...(phone ? [{ phone: phone }] : [])],
-    })
-
+    // Check if customer already exists in this tenant's DB
+    const existingCustomer = await CustomerModel.findOne({ email, tenantId })
     if (existingCustomer) {
-      if (!existingCustomer.password) {
-        return res.status(400).json({
-          error: "An account with this email/phone exists but needs migration",
-          code: "ACCOUNT_NEEDS_MIGRATION",
-          canMigrate: true,
-          migrationData: {
-            email: existingCustomer.email,
-            phone: existingCustomer.phone,
-            name: existingCustomer.name,
-          },
-        })
-      }
-
-      return res.status(400).json({
-        error: "An account with this email or phone already exists",
-        canLogin: true,
-      })
+      return res.status(409).json({ error: "Customer with this email already exists for this store" })
     }
-
-    // Hash password
-    const hashedPassword = await bcrypt.hash(password, 12)
-    console.log(`🔐 Hashing password for ${email}: ${password} -> ${hashedPassword}`)
 
     // Create new customer
-    const customer = new Customer({
-      name: name.trim(),
-      email: email.toLowerCase(),
-      password: hashedPassword,
-      phone: phone || "",
-      totalSpent: 0,
-      orderCount: 0,
-      isActive: true,
-      preferences: {
-        notifications: true,
-        marketing: false,
-      },
+    const newCustomer = new CustomerModel({
+      tenantId,
+      email,
+      password, // Will be hashed by pre-save middleware
+      name,
+      phone,
+      role: "customer", // Explicitly set role
     })
+    await newCustomer.save()
+    console.log(`✅ New customer registered: ${email} for tenant: ${tenantId}`)
 
-    await customer.save()
-    console.log(`👤 New customer registered: ${email}`)
+    // Optionally send a welcome email
+    // await sendWelcomeEmail(email, name);
 
-    // Generate JWT token
-    const token = generateToken({
-      customerId: customer._id,
-      email: customer.email,
-      storeId: req.storeId,
-      tenantId: req.tenantId,
-      type: "customer",
-    })
+    // Generate JWT token for immediate login
+    const token = jwt.sign(
+      { email: newCustomer.email, customerId: newCustomer._id, tenantId: newCustomer.tenantId },
+      process.env.JWT_SECRET,
+      { expiresIn: "1d" },
+    )
 
-    const response = {
-      message: "Registration successful",
+    res.status(201).json({
+      message: "Customer registration successful. Welcome!",
       token,
       customer: {
-        id: customer._id,
-        name: customer.name,
-        email: customer.email,
-        phone: customer.phone,
-        totalSpent: customer.totalSpent,
-        orderCount: customer.orderCount,
+        id: newCustomer._id,
+        email: newCustomer.email,
+        name: newCustomer.name,
+        tenantId: newCustomer.tenantId,
       },
-      storeId: req.storeId,
-      tenantId: req.tenantId,
-    }
-
-    console.log("✅ Customer registration successful")
-    res.status(201).json(response)
+    })
   } catch (error) {
     console.error("❌ Customer registration error:", error)
-    res.status(500).json({
-      error: "Failed to register customer",
-      details: error.message,
-    })
+    res.status(500).json({ error: error.message })
   }
 })
 
-// Enhanced customer login with detailed debugging
+// Customer login for a specific tenant store
 router.post("/login", async (req, res) => {
   try {
-    const { email, password, rememberMe } = req.body
+    const { email, password } = req.body
+    const tenantId = req.tenantId // From storeContextMiddleware
 
-    console.log(`🔐 Customer login attempt for store: ${req.storeId}`)
-    console.log(`🔐 Email: ${email}`)
-    console.log(`🔐 Password provided: ${!!password}`)
-    console.log(`🔐 Password length: ${password ? password.length : 0}`)
+    console.log(`🔐 Customer login attempt for: ${email} on tenant: ${tenantId}`)
 
-    // Validation
-    if (!email || !password) {
-      console.log("❌ Missing credentials")
-      return res.status(400).json({
-        error: "Email and password are required",
-        code: "MISSING_CREDENTIALS",
-      })
+    if (!email || !password || !tenantId) {
+      return res.status(400).json({ error: "Email, password, and tenant ID are required" })
     }
 
-    if (!validateEmail(email)) {
-      console.log("❌ Invalid email format")
-      return res.status(400).json({
-        error: "Please enter a valid email address",
-        code: "INVALID_EMAIL",
-      })
-    }
+    const tenantDbConnection = await getTenantDB(tenantId)
+    const CustomerModel = TenantUser(tenantDbConnection) // Use TenantUser model for customers
 
-    if (!req.models) {
-      console.error("❌ Models not initialized")
-      return res.status(500).json({ error: "Database models not initialized" })
-    }
-
-    const { Customer } = req.models
-
-    // Find customer
-    console.log(`🔍 Looking for customer with email: ${email.toLowerCase()}`)
-    const customer = await Customer.findOne({ email: email.toLowerCase() })
+    const customer = await CustomerModel.findOne({ email, tenantId })
 
     if (!customer) {
-      console.log("❌ Customer not found in database")
-      return res.status(401).json({
-        error: "Invalid email or password",
-        code: "INVALID_CREDENTIALS",
-        canRegister: true,
-      })
+      console.log(`❌ Customer not found: ${email} for tenant: ${tenantId}`)
+      return res.status(401).json({ error: "Invalid credentials" })
     }
 
-    console.log(`✅ Customer found:`)
-    console.log(`   - ID: ${customer._id}`)
-    console.log(`   - Name: ${customer.name}`)
-    console.log(`   - Email: ${customer.email}`)
-    console.log(`   - Has Password: ${!!customer.password}`)
-    console.log(
-      `   - Stored Password Hash (first 20 chars): ${customer.password ? customer.password.substring(0, 20) + "..." : "None"}`,
-    )
-    console.log(`   - Is Active: ${customer.isActive}`)
-
-    // Check if account needs migration
-    if (!customer.password) {
-      console.log("❌ Customer has no password - needs migration")
-      return res.status(400).json({
-        error: "Your account needs to be migrated to use password login",
-        code: "NO_PASSWORD_SET",
-        canMigrate: true,
-        migrationData: {
-          email: customer.email,
-          phone: customer.phone,
-          name: customer.name,
-        },
-      })
+    const isMatch = await bcrypt.compare(password, customer.password)
+    if (!isMatch) {
+      console.log(`❌ Password mismatch for customer: ${email} on tenant: ${tenantId}`)
+      return res.status(401).json({ error: "Invalid credentials" })
     }
 
-    // Verify password with detailed logging
-    console.log(`🔐 Comparing password...`)
-    console.log(`   - Input password (first 5 chars): "${password.substring(0, 5)}..."`)
-    console.log(`   - Stored hash: ${customer.password}`)
-
-    const isPasswordValid = await bcrypt.compare(password, customer.password)
-    console.log(`🔐 Password comparison result: ${isPasswordValid}`)
-
-    if (!isPasswordValid) {
-      console.log("❌ Password comparison failed")
-
-      // Test with common passwords for debugging
-      const testPasswords = ["password123", "Password123", "password", "123456", "test123"]
-      console.log("🧪 Testing common passwords:")
-
-      for (const testPwd of testPasswords) {
-        const testResult = await bcrypt.compare(testPwd, customer.password)
-        console.log(`   - "${testPwd}": ${testResult}`)
-        if (testResult) {
-          console.log(`✅ Found matching password: "${testPwd}"`)
-          break
-        }
-      }
-
-      return res.status(401).json({
-        error: "Invalid email or password",
-        code: "INVALID_CREDENTIALS",
-        canResetPassword: true,
-        debug:
-          process.env.NODE_ENV === "development"
-            ? {
-                providedPassword: password,
-                hashExists: !!customer.password,
-                hashLength: customer.password ? customer.password.length : 0,
-              }
-            : undefined,
-      })
-    }
-
-    // Check if account is active
     if (!customer.isActive) {
-      console.log("❌ Customer account is inactive")
-      return res.status(401).json({
-        error: "Account is deactivated. Please contact support.",
-        code: "ACCOUNT_DEACTIVATED",
-      })
+      console.log(`❌ Customer ${email} is inactive for tenant: ${tenantId}`)
+      return res.status(403).json({ error: "Account is inactive. Please contact store support." })
     }
 
-    console.log(`✅ Customer login successful: ${email}`)
-
-    // Generate JWT token with appropriate expiration
-    const expiresIn = rememberMe ? "90d" : "30d"
-    const token = generateToken(
-      {
-        customerId: customer._id,
-        email: customer.email,
-        storeId: req.storeId,
-        tenantId: req.tenantId,
-        type: "customer",
-      },
-      expiresIn,
+    // Generate JWT token
+    const token = jwt.sign(
+      { email: customer.email, customerId: customer._id, tenantId: customer.tenantId },
+      process.env.JWT_SECRET,
+      { expiresIn: "1d" },
     )
 
-    // Update last login
-    customer.lastLoginAt = new Date()
-    await customer.save()
+    console.log(`✅ Customer login successful for ${email} on tenant: ${tenantId}. JWT issued.`)
 
-    const response = {
+    return res.status(200).json({
       message: "Login successful",
       token,
       customer: {
         id: customer._id,
-        name: customer.name,
         email: customer.email,
-        phone: customer.phone,
-        totalSpent: customer.totalSpent,
-        orderCount: customer.orderCount,
-        lastOrderDate: customer.lastOrderDate,
-        addresses: customer.addresses || [],
+        name: customer.name,
+        tenantId: customer.tenantId,
       },
-      storeId: req.storeId,
-      tenantId: req.tenantId,
-      expiresIn,
+    })
+  } catch (err) {
+    console.error("❌ Customer login error:", err)
+    res.status(500).json({ error: "Internal server error" })
+  }
+})
+
+// Request OTP for customer login (if using OTP-based login)
+router.post("/request-otp", async (req, res) => {
+  try {
+    const { email } = req.body
+    const tenantId = req.tenantId
+
+    console.log(`🔢 Customer OTP request for: ${email} on tenant: ${tenantId}`)
+
+    if (!email || !tenantId) {
+      return res.status(400).json({ error: "Email and tenant ID are required" })
     }
 
-    console.log("✅ Login response prepared successfully")
-    res.json(response)
-  } catch (error) {
-    console.error("❌ Customer login error:", error)
-    res.status(500).json({
-      error: "Failed to login",
-      details: error.message,
+    const tenantDbConnection = await getTenantDB(tenantId)
+    const CustomerModel = TenantUser(tenantDbConnection)
+
+    const customer = await CustomerModel.findOne({ email, tenantId })
+    if (!customer) {
+      return res.status(404).json({ error: "No customer found with this email for this store" })
+    }
+
+    // Use the main OTP model for customer login purpose
+    const otp = await OTP.createOTP(email, "customer_login")
+    await sendOTPEmail(email, otp, "customer login")
+
+    res.json({
+      message: "Login OTP sent to your email",
+      email,
+      expiresIn: "10 minutes",
     })
+  } catch (error) {
+    console.error("❌ Customer request OTP error:", error)
+    res.status(500).json({ error: error.message })
+  }
+})
+
+// Verify OTP for customer login
+router.post("/verify-otp", async (req, res) => {
+  try {
+    const { email, otp } = req.body
+    const tenantId = req.tenantId
+
+    console.log(`🔍 Customer verify OTP for: ${email} on tenant: ${tenantId}, OTP: ${otp}`)
+
+    if (!email || !otp || !tenantId) {
+      return res.status(400).json({ error: "Email, OTP, and tenant ID are required" })
+    }
+
+    const otpDoc = await OTP.verifyOTP(email, otp, "customer_login")
+    if (!otpDoc) {
+      return res.status(400).json({ error: "Invalid or expired OTP" })
+    }
+
+    const tenantDbConnection = await getTenantDB(tenantId)
+    const CustomerModel = TenantUser(tenantDbConnection)
+
+    const customer = await CustomerModel.findOne({ email, tenantId })
+    if (!customer) {
+      return res.status(404).json({ error: "Customer not found" })
+    }
+
+    if (!customer.isActive) {
+      return res.status(403).json({ error: "Account is inactive. Please contact store support." })
+    }
+
+    // Generate JWT token
+    const token = jwt.sign(
+      { email: customer.email, customerId: customer._id, tenantId: customer.tenantId },
+      process.env.JWT_SECRET,
+      { expiresIn: "1d" },
+    )
+
+    res.status(200).json({
+      message: "OTP verified and login successful",
+      token,
+      customer: {
+        id: customer._id,
+        email: customer.email,
+        name: customer.name,
+        tenantId: customer.tenantId,
+      },
+    })
+  } catch (error) {
+    console.error("❌ Customer verify OTP error:", error)
+    res.status(500).json({ error: error.message })
   }
 })
 

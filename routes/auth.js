@@ -1,597 +1,314 @@
 const express = require("express")
-const jwt = require("jsonwebtoken")
 const bcrypt = require("bcryptjs")
-const { getMainDb } = require("../db/connection") // Updated import
+const jwt = require("jsonwebtoken")
+const { getMainDb } = require("../db/connection")
 const PendingRegistration = require("../models/PendingRegistration")
-const { getTenantDB } = require("../config/tenantDB")
-const router = express.Router()
 const OTP = require("../models/OTP")
-const { sendWelcomeEmail, sendOTPEmail } = require("../config/email")
+const User = require("../models/User") // Import the User model function
+const { sendOTPEmail } = require("../config/email")
 
-// Import User model as a function that takes a connection
-const UserModel = require("../models/User")
+const router = express.Router()
 
-// Add request logging middleware
-router.use((req, res, next) => {
-  console.log(`📍 AUTH ROUTE: ${req.method} ${req.path}`)
-  console.log(`🔍 Host: ${req.get("host")}`)
-  console.log(`🔍 Headers:`, {
-    host: req.get("host"),
-    authorization: req.get("authorization") ? "Bearer ***" : "None",
-    "content-type": req.get("content-type"),
-    "user-agent": req.get("user-agent"),
-  })
-
-  // Log request body for POST requests (password hidden for security)
-  if (req.method === "POST" && req.body) {
-    console.log(`📦 Request Body:`, {
-      ...req.body,
-      password: req.body.password ? "[HIDDEN]" : undefined,
-    })
-  }
-
-  next()
-})
-
-// Helper function to generate 6-digit unique store ID
-const generateStoreId = async () => {
-  let storeId
-  let isUnique = false
-  while (!isUnique) {
-    storeId = Math.random().toString(36).substring(2, 8).toUpperCase()
-    const mainConnection = getMainDb()
-    const User = UserModel(mainConnection)
-    const existingUser = await User.findOne({ storeId: storeId })
-    if (!existingUser) {
-      isUnique = true
-    }
-  }
-  return storeId
-}
-
-// Helper function to generate tenant ID
+// Helper to generate a unique tenant ID
 const generateTenantId = () => {
   return `tenant_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`
 }
 
-// Validate email format
-const validateEmail = (email) => {
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
-  return emailRegex.test(email)
-}
-
-// Step 1: Initiate Registration (Send OTP)
+// Initiate registration (send OTP)
 router.post("/register/initiate", async (req, res) => {
   try {
-    const { name, email, phone, password } = req.body
-    console.log(`📝 Initiate registration request for: ${email}`)
+    const { email } = req.body
 
-    // Validate required fields
-    if (!name || !email || !password) {
-      return res.status(400).json({
-        error: "Name, email, and password are required",
-      })
+    console.log(`📝 Register initiate request for: ${email}`)
+
+    if (!email) {
+      return res.status(400).json({ error: "Email is required" })
     }
 
-    // Validate name
-    if (name.trim().length < 2) {
-      return res.status(400).json({ error: "Name must be at least 2 characters long" })
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ error: "Invalid email format" })
     }
 
-    // Validate email format
-    if (!validateEmail(email)) {
-      return res.status(400).json({ error: "Please enter a valid email address" })
-    }
-
-    // Validate password
-    if (password.length < 6) {
-      return res.status(400).json({ error: "Password must be at least 6 characters long" })
-    }
+    const mainConnection = getMainDb()
+    const UserModel = User(mainConnection) // Get User model for main connection
 
     // Check if user already exists in main DB
-    const mainConnection = getMainDb()
-    const User = UserModel(mainConnection)
-    const existingUser = await User.findOne({ email })
+    const existingUser = await UserModel.findOne({ email })
     if (existingUser) {
-      return res.status(400).json({ error: "User already exists with this email" })
+      return res.status(409).json({ error: "User with this email already exists" })
     }
 
-    // Check if there's a pending registration for this email
-    const existingPending = await PendingRegistration.findOne({ email })
-    if (existingPending) {
-      // If a pending registration exists and is not expired, resend OTP
-      if (existingPending.expiresAt > new Date()) {
-        const otp = await OTP.createOTP(email, "registration")
-        await sendOTPEmail(email, otp, "registration")
-        console.log(`🔄 Resent OTP for existing pending registration: ${email}`)
-        return res.json({
-          message: "An active registration attempt exists. New OTP sent to your email.",
-          email,
-          expiresIn: "10 minutes",
-        })
-      } else {
-        // If expired, delete and create new
-        await PendingRegistration.deleteOne({ email })
-        await OTP.deleteMany({ email, purpose: "registration" })
-        console.log(`🗑️ Cleaned up expired pending registration for: ${email}`)
-      }
+    // Check for existing pending registration
+    let pendingReg = await PendingRegistration.findOne({ email })
+    if (pendingReg && pendingReg.createdAt > new Date(Date.now() - 5 * 60 * 1000)) {
+      // If a pending registration exists and is less than 5 minutes old,
+      // just resend OTP without creating a new one.
+      console.log(`⚠️ Existing pending registration found for ${email}, resending OTP.`)
+    } else {
+      // Create or update pending registration
+      pendingReg = await PendingRegistration.findOneAndUpdate(
+        { email },
+        { email, status: "pending", expiresAt: new Date(Date.now() + 10 * 60 * 1000) }, // Expires in 10 mins
+        { upsert: true, new: true, setDefaultsOnInsert: true },
+      )
+      console.log(`✅ Pending registration created/updated for ${email}`)
     }
 
-    // Create or update pending registration
-    const pendingRegistration = new PendingRegistration({
-      name,
-      email,
-      phone: phone || "",
-      password, // Password will be hashed by pre-save middleware
-    })
-    await pendingRegistration.save()
-    console.log(`⏳ Pending registration created for: ${email}`)
-
-    // Generate and send OTP
+    // Generate and save OTP
     const otp = await OTP.createOTP(email, "registration")
+    console.log(`🔢 Generated registration OTP for ${email}: ${otp}`)
+
+    // Send OTP via email
     await sendOTPEmail(email, otp, "registration")
-    console.log(`🔢 Generated and sent OTP for ${email}: ${otp}`)
 
     res.json({
-      message: "OTP sent successfully to your email. Please verify to complete registration.",
+      message: "Registration code sent to your email",
       email,
       expiresIn: "10 minutes",
     })
   } catch (error) {
-    console.error("❌ Initiate registration error:", error)
+    console.error("❌ Register initiate error:", error)
     res.status(500).json({ error: error.message })
   }
 })
 
-// Step 2: Complete Registration (Verify OTP and Create User)
-router.post("/register/complete", async (req, res) => {
+// Verify registration OTP
+router.post("/register/verify", async (req, res) => {
   try {
     const { email, otp } = req.body
-    console.log(`✅ Complete registration request for: ${email}`)
+
+    console.log(`🔍 Register verify request for: ${email}, OTP: ${otp}`)
 
     if (!email || !otp) {
       return res.status(400).json({ error: "Email and OTP are required" })
     }
 
     // Verify OTP
-    const otpVerification = await OTP.verifyOTP(email, otp, "registration")
-    if (!otpVerification.success) {
-      return res.status(400).json({ error: otpVerification.message })
+    const otpDoc = await OTP.verifyOTP(email, otp, "registration")
+    if (!otpDoc) {
+      console.log(`❌ Invalid or expired OTP for ${email}`)
+      return res.status(400).json({ error: "Invalid or expired OTP" })
     }
 
-    // Retrieve pending registration details
-    const pendingRegistration = await PendingRegistration.findOne({ email })
-    if (!pendingRegistration) {
-      return res.status(400).json({
-        error: "No pending registration found or it has expired. Please initiate registration again.",
-      })
+    // Update pending registration status
+    const pendingReg = await PendingRegistration.findOneAndUpdate(
+      { email },
+      { status: "verified", verifiedAt: new Date() },
+      { new: true },
+    )
+
+    if (!pendingReg) {
+      console.log(`❌ No pending registration found for ${email} after OTP verification.`)
+      return res.status(404).json({ error: "No pending registration found" })
     }
 
-    // Check if user already exists in main DB (double check to prevent race conditions)
-    const mainConnection = getMainDb()
-    const User = UserModel(mainConnection)
-    const existingUser = await User.findOne({ email })
-    if (existingUser) {
-      // Clean up pending registration if user already exists
-      await PendingRegistration.deleteOne({ email })
-      return res.status(400).json({ error: "User already exists with this email" })
-    }
+    console.log(`✅ Registration OTP verified for ${email}. Status: ${pendingReg.status}`)
 
-    const { name, phone, password: hashedPassword } = pendingRegistration // Get hashed password
-
-    // Generate tenant ID
-    const tenantId = generateTenantId()
-    console.log(`🏗️ Creating tenant: ${tenantId} for user: ${email}`)
-
-    try {
-      // Create tenant database connection
-      const tenantDB = await getTenantDB(tenantId)
-      console.log(`✅ Tenant DB created: ${tenantId}`)
-
-      // Initialize all tenant models
-      const TenantUser = require("../models/tenant/User")(tenantDB)
-      const Product = require("../models/tenant/Product")(tenantDB)
-      const Order = require("../models/tenant/Order")(tenantDB)
-      const Category = require("../models/tenant/Category")(tenantDB)
-      const Customer = require("../models/tenant/Customer")(tenantDB)
-      const Offer = require("../models/tenant/Offer")(tenantDB)
-      const Payment = require("../models/tenant/Payment")(tenantDB)
-      const Settings = require("../models/tenant/Settings")(tenantDB)
-      console.log(`📋 Models initialized for tenant: ${tenantId}`)
-
-      // Create user in tenant DB with full data
-      const tenantUser = new TenantUser({
-        name,
-        email,
-        phone,
-        password: hashedPassword, // Use the already hashed password
-        role: "owner",
-        hasStore: false,
-      })
-      await tenantUser.save()
-      console.log(`👤 Tenant user created: ${email}`)
-
-      // Create user in main DB for authentication lookup
-      const mainUser = new User({
-        email,
-        password: hashedPassword, // Use the already hashed password
-        tenantId,
-      })
-      await mainUser.save()
-      console.log(`🔑 Main user created for auth: ${email}`)
-
-      // Create default settings
-      const defaultSettings = new Settings({
-        general: {
-          storeName: "",
-          logo: "",
-          banner: "",
-          tagline: "Welcome to our store",
-          supportEmail: email,
-          supportPhone: phone,
-        },
-        payment: {
-          codEnabled: true,
-        },
-        social: {
-          instagram: "",
-          whatsapp: phone,
-          facebook: "",
-        },
-        shipping: {
-          deliveryTime: "2-3 business days",
-          charges: 50,
-          freeShippingAbove: 500,
-        },
-      })
-      await defaultSettings.save()
-      console.log(`⚙️ Default settings created for tenant: ${tenantId}`)
-
-      // Create default category
-      const defaultCategory = new Category({
-        name: "General",
-        description: "General products category",
-        isActive: true,
-      })
-      await defaultCategory.save()
-      console.log(`🗂️ Default category created for tenant: ${tenantId}`)
-
-      // Send welcome email
-      try {
-        await sendWelcomeEmail(email, name)
-      } catch (emailError) {
-        console.error("❌ Welcome email failed:", emailError)
-        // Don't fail registration if email fails
-      }
-
-      // Delete the pending registration record
-      await PendingRegistration.deleteOne({ email })
-      console.log(`🗑️ Pending registration deleted for: ${email}`)
-
-      // Generate JWT with tenant info
-      const token = jwt.sign(
-        {
-          userId: tenantUser._id,
-          tenantId: tenantId,
-          email: email,
-        },
-        process.env.JWT_SECRET || "your-secret-key",
-        { expiresIn: "7d" },
-      )
-
-      res.status(201).json({
-        message: "User registered successfully",
-        token,
-        tenantId,
-        status: "no_store",
-      })
-    } catch (dbError) {
-      console.error(`❌ Tenant setup error for ${tenantId}:`, dbError)
-      throw new Error(`Failed to setup tenant: ${dbError.message}`)
-    }
+    res.json({
+      message: "Email verified successfully. You can now complete your registration.",
+      email,
+      verified: true,
+    })
   } catch (error) {
-    console.error("❌ Complete registration error:", error)
+    console.error("❌ Register verify error:", error)
     res.status(500).json({ error: error.message })
   }
 })
 
-// Login Route
-router.post("/login", async (req, res) => {
+// Complete registration (set password and create user)
+router.post("/register/complete", async (req, res) => {
   try {
-    console.log("🔐 Login attempt started")
-
     const { email, password } = req.body
 
-    // Validate input
+    console.log(`📝 Register complete request for: ${email}`)
+
     if (!email || !password) {
-      console.log("❌ Missing email or password")
       return res.status(400).json({ error: "Email and password are required" })
     }
 
-    console.log(`🔍 Looking for user: ${email}`)
+    if (password.length < 6) {
+      return res.status(400).json({ error: "Password must be at least 6 characters long" })
+    }
 
-    // Get main connection and User model
+    // Check pending registration status
+    const pendingReg = await PendingRegistration.findOne({ email, status: "verified" })
+
+    if (!pendingReg) {
+      console.log(`❌ Registration not verified or already completed for ${email}`)
+      return res.status(400).json({
+        error: "Registration not verified or already completed. Please initiate registration again.",
+      })
+    }
+
     const mainConnection = getMainDb()
-    const User = UserModel(mainConnection)
+    const UserModel = User(mainConnection) // Get User model for main connection
 
-    // Find user in main DB for auth
-    const user = await User.findOne({ email: email.toLowerCase().trim() })
-    if (!user) {
+    // Check if user already exists (double-check to prevent race conditions)
+    const existingUser = await UserModel.findOne({ email })
+    if (existingUser) {
+      console.log(`⚠️ User already exists during complete registration for ${email}`)
+      await PendingRegistration.deleteOne({ email }) // Clean up pending registration
+      return res.status(409).json({ error: "User with this email already exists" })
+    }
+
+    // Generate a unique tenantId
+    const tenantId = generateTenantId()
+    console.log(`Generated tenantId for ${email}: ${tenantId}`)
+
+    // Create user in main DB
+    const newUser = new UserModel({
+      email,
+      password, // Password will be hashed by pre-save middleware in User model
+      tenantId,
+      role: "admin", // Default role for the main user of a tenant
+    })
+    await newUser.save()
+    console.log(`✅ Main user created for ${email} with tenantId: ${tenantId}`)
+
+    // Clean up pending registration
+    await PendingRegistration.deleteOne({ email })
+    console.log(`🗑️ Pending registration deleted for ${email}`)
+
+    // Generate JWT token for immediate login
+    const token = jwt.sign(
+      { email: newUser.email, tenantId: newUser.tenantId, userId: newUser._id },
+      process.env.JWT_SECRET,
+      { expiresIn: "1d" },
+    )
+
+    res.status(201).json({
+      message: "Registration successful. Welcome!",
+      token,
+      user: {
+        email: newUser.email,
+        tenantId: newUser.tenantId,
+        role: newUser.role,
+      },
+    })
+  } catch (error) {
+    console.error("❌ Register complete error:", error)
+    res.status(500).json({ error: error.message })
+  }
+})
+
+// Login handler
+router.post("/login", async (req, res) => {
+  try {
+    const { email, password } = req.body
+
+    console.log(`🔐 Login attempt for: ${email}`)
+    console.log(`📦 Request Body:`, {
+      email,
+      password: password ? "[HIDDEN]" : "undefined",
+    }) // Hide password in logs
+
+    if (!email || !password) {
+      return res.status(400).json({ error: "Email and password are required" })
+    }
+
+    const mainConnection = getMainDb()
+    const UserModel = User(mainConnection) // Get User model for main connection
+
+    const mainUser = await UserModel.findOne({ email: email.toLowerCase().trim() })
+
+    if (!mainUser) {
       console.log(`❌ User not found in main DB: ${email}`)
       return res.status(401).json({ error: "Invalid credentials" })
     }
 
-    console.log(`✅ Found main user: ${email}, tenantId: ${user.tenantId}`)
+    console.log(`✅ Found main user: ${mainUser.email}, tenantId: ${mainUser.tenantId}`)
 
-    // Use direct bcrypt comparison for reliability
-    try {
-      console.log(`🔍 Comparing password for user: ${email}`)
+    const isMatch = await bcrypt.compare(password, mainUser.password)
+    console.log(`🔑 Password comparison result: ${isMatch}`)
 
-      const isMatch = await bcrypt.compare(password, user.password)
-      console.log(`🔑 Password comparison result: ${isMatch}`)
-
-      if (!isMatch) {
-        console.log(`❌ Password mismatch for user: ${email}`)
-        return res.status(401).json({ error: "Invalid credentials" })
-      }
-    } catch (passwordError) {
-      console.error(`❌ Password comparison error:`, passwordError)
-      return res.status(500).json({ error: "Authentication error" })
+    if (!isMatch) {
+      console.log(`❌ Password mismatch for user: ${mainUser.email}`)
+      return res.status(401).json({ error: "Invalid credentials" })
     }
 
-    console.log(`✅ Password verified for user: ${email}`)
-
-    // Get tenant DB and user data
-    try {
-      const tenantDB = await getTenantDB(user.tenantId)
-      console.log(`✅ Connected to tenant DB: ${user.tenantId}`)
-
-      const TenantUser = require("../models/tenant/User")(tenantDB)
-      const tenantUser = await TenantUser.findOne({ email: email.toLowerCase().trim() })
-
-      if (!tenantUser) {
-        console.log(`❌ Tenant user not found: ${email}`)
-        return res.status(400).json({ error: "User data not found" })
-      }
-
-      console.log(`✅ Found tenant user: ${email}`)
-
-      // Generate JWT
-      const token = jwt.sign(
-        {
-          userId: tenantUser._id,
-          tenantId: user.tenantId,
-          email: email,
-        },
-        process.env.JWT_SECRET || "your-secret-key",
-        { expiresIn: "7d" },
-      )
-
-      console.log(`✅ JWT generated for user: ${email}`)
-
-      // Prepare response
-      const response = {
-        token,
-        tenantId: user.tenantId,
-        storeId: user.storeId || null,
-        hasStore: tenantUser.hasStore || false,
-        user: {
-          name: tenantUser.name,
-          email: tenantUser.email,
-          phone: tenantUser.phone || "",
-          role: tenantUser.role,
-        },
-      }
-
-      console.log(`✅ Login successful for: ${email}`)
-
-      res.json(response)
-    } catch (tenantError) {
-      console.error(`❌ Tenant DB error for ${user.tenantId}:`, tenantError)
-      return res.status(500).json({ error: "Failed to access user data" })
+    // Check if user is active
+    if (!mainUser.isActive) {
+      console.log(`❌ User ${mainUser.email} is inactive.`)
+      return res.status(403).json({ error: "Account is inactive. Please contact support." })
     }
-  } catch (error) {
-    console.error("❌ Login error:", error)
+
+    // JWT creation
+    const token = jwt.sign(
+      { email: mainUser.email, tenantId: mainUser.tenantId, userId: mainUser._id, role: mainUser.role },
+      process.env.JWT_SECRET,
+      { expiresIn: "1d" },
+    )
+
+    console.log(`✅ Login successful for ${mainUser.email}. JWT issued.`)
+
+    return res.status(200).json({
+      message: "Login successful",
+      token,
+      user: {
+        email: mainUser.email,
+        tenantId: mainUser.tenantId,
+        role: mainUser.role,
+      },
+    })
+  } catch (err) {
+    console.error("❌ Login error:", err)
     res.status(500).json({ error: "Internal server error" })
   }
 })
 
-// Login with OTP (optional secure login)
-router.post("/login-otp", async (req, res) => {
+// Resend registration OTP
+router.post("/resend-registration-otp", async (req, res) => {
   try {
-    const { email, otp } = req.body
+    const { email } = req.body
 
-    // Verify OTP
-    const otpVerification = await OTP.verifyOTP(email, otp, "login")
-    if (!otpVerification.success) {
-      return res.status(400).json({ error: otpVerification.message })
+    console.log(`🔄 Resend registration OTP request for: ${email}`)
+
+    if (!email) {
+      return res.status(400).json({ error: "Email is required" })
     }
 
-    // Find user in main DB
+    // Check rate limiting for OTP resend
+    const recentOTP = await OTP.findOne({
+      email,
+      purpose: "registration",
+      createdAt: { $gt: new Date(Date.now() - 60 * 1000) }, // Last 1 minute
+    })
+
+    if (recentOTP) {
+      return res.status(429).json({
+        error: "Please wait 1 minute before requesting a new OTP",
+      })
+    }
+
     const mainConnection = getMainDb()
-    const User = UserModel(mainConnection)
-    const mainUser = await User.findOne({ email })
-    if (!mainUser) {
-      return res.status(400).json({ error: "User not found" })
+    const UserModel = User(mainConnection)
+
+    // Ensure user does not already exist
+    const existingUser = await UserModel.findOne({ email })
+    if (existingUser) {
+      return res.status(409).json({ error: "User with this email already exists" })
     }
 
-    // Get tenant DB and user data
-    const tenantDB = await getTenantDB(mainUser.tenantId)
-    const TenantUser = require("../models/tenant/User")(tenantDB)
-    const tenantUser = await TenantUser.findOne({ email })
-
-    if (!tenantUser) {
-      return res.status(400).json({ error: "User data not found" })
+    // Ensure there's a pending registration
+    const pendingReg = await PendingRegistration.findOne({ email })
+    if (!pendingReg) {
+      return res.status(404).json({ error: "No pending registration found for this email." })
     }
 
-    // Generate JWT
-    const token = jwt.sign(
-      {
-        userId: tenantUser._id,
-        tenantId: mainUser.tenantId,
-        email: email,
-      },
-      process.env.JWT_SECRET || "your-secret-key",
-      { expiresIn: "7d" },
-    )
+    // Generate and send new OTP
+    const otp = await OTP.createOTP(email, "registration")
+    console.log(`🔄 Resent registration OTP for ${email}: ${otp}`)
+
+    await sendOTPEmail(email, otp, "registration")
 
     res.json({
-      token,
-      tenantId: mainUser.tenantId,
-      storeId: mainUser.storeId || null,
-      hasStore: tenantUser.hasStore,
-      user: {
-        name: tenantUser.name,
-        email: tenantUser.email,
-        phone: tenantUser.phone,
-        role: tenantUser.role,
-      },
+      message: "New registration code sent successfully",
+      email,
+      expiresIn: "10 minutes",
     })
   } catch (error) {
-    console.error("❌ OTP Login error:", error)
-    res.status(500).json({ error: error.message })
-  }
-})
-
-// Setup Store
-router.post("/setup-store", async (req, res) => {
-  try {
-    const token = req.header("Authorization")?.replace("Bearer ", "")
-    if (!token) {
-      return res.status(401).json({ error: "Access denied" })
-    }
-
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || "your-secret-key")
-
-    // Get main user for tenant lookup
-    const mainConnection = getMainDb()
-    const User = UserModel(mainConnection)
-    const mainUser = await User.findOne({ email: decoded.email })
-    if (!mainUser) {
-      return res.status(404).json({ error: "User not found" })
-    }
-
-    // Get tenant user
-    const tenantDB = await getTenantDB(mainUser.tenantId)
-    const TenantUser = require("../models/tenant/User")(tenantDB)
-    const tenantUser = await TenantUser.findById(decoded.userId)
-
-    if (!tenantUser) {
-      return res.status(404).json({ error: "Tenant user not found" })
-    }
-
-    if (tenantUser.hasStore) {
-      return res.status(400).json({ error: "Store already exists for this user" })
-    }
-
-    const { storeName, logo, banner, industry } = req.body
-
-    // Generate unique 6-digit store ID
-    const storeId = await generateStoreId()
-    console.log(`🏪 Setting up store with ID: ${storeId} for tenant: ${mainUser.tenantId}`)
-
-    // Update tenant user with store info
-    tenantUser.hasStore = true
-    tenantUser.storeInfo = {
-      name: storeName,
-      logo: logo || "",
-      banner: banner || "",
-      storeId: storeId,
-      industry: industry || "General",
-      isActive: true,
-    }
-    await tenantUser.save()
-
-    // Update main user with store ID
-    mainUser.storeId = storeId
-    await mainUser.save()
-
-    // Update settings with store info
-    const Settings = require("../models/tenant/Settings")(tenantDB)
-    const settings = await Settings.findOne()
-    if (settings) {
-      settings.general.storeName = storeName
-      settings.general.logo = logo || ""
-      settings.general.banner = banner || ""
-      await settings.save()
-    }
-
-    console.log(`✅ Store setup completed for: ${storeName} (${storeId})`)
-
-    // Dynamically construct the base URL from the request
-    const baseUrl = `${req.protocol}://${req.get("host")}`
-
-    res.json({
-      message: "Store setup completed successfully",
-      tenantId: mainUser.tenantId,
-      storeId,
-      storeUrl: `${baseUrl}/api/${storeId.toLowerCase()}`,
-      adminUrl: `${baseUrl}/api/admin`,
-    })
-  } catch (error) {
-    console.error("❌ Store setup error:", error)
-    res.status(500).json({ error: error.message })
-  }
-})
-
-// Get user status - MOVED TO CORRECT LOCATION
-router.get("/user/status", async (req, res) => {
-  try {
-    const token = req.header("Authorization")?.replace("Bearer ", "")
-    if (!token) {
-      return res.status(401).json({ error: "Access denied. No token provided." })
-    }
-
-    console.log("🔍 Getting user status...")
-
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || "your-secret-key")
-    console.log("✅ Token decoded:", { email: decoded.email, tenantId: decoded.tenantId })
-
-    // Get main user for tenant lookup
-    const mainConnection = getMainDb()
-    const User = UserModel(mainConnection)
-    const mainUser = await User.findOne({ email: decoded.email })
-    if (!mainUser) {
-      console.log("❌ Main user not found")
-      return res.status(404).json({ error: "User not found" })
-    }
-
-    console.log("✅ Main user found:", { tenantId: mainUser.tenantId, storeId: mainUser.storeId })
-
-    // Get tenant user data
-    const tenantDB = await getTenantDB(mainUser.tenantId)
-    const TenantUser = require("../models/tenant/User")(tenantDB)
-    const tenantUser = await TenantUser.findById(decoded.userId).select("-password")
-
-    if (!tenantUser) {
-      console.log("❌ Tenant user not found")
-      return res.status(404).json({ error: "Tenant user not found" })
-    }
-
-    console.log("✅ Tenant user found:", { hasStore: tenantUser.hasStore })
-
-    res.json({
-      user: {
-        id: tenantUser._id,
-        name: tenantUser.name,
-        email: tenantUser.email,
-        phone: tenantUser.phone,
-        role: tenantUser.role,
-        hasStore: tenantUser.hasStore,
-        storeInfo: tenantUser.storeInfo || null,
-      },
-      hasStore: tenantUser.hasStore,
-      tenantId: mainUser.tenantId,
-      storeId: mainUser.storeId || null,
-    })
-  } catch (error) {
-    console.error("❌ User status error:", error)
-    if (error.name === "JsonWebTokenError") {
-      return res.status(401).json({ error: "Invalid token" })
-    }
-    if (error.name === "TokenExpiredError") {
-      return res.status(401).json({ error: "Token expired" })
-    }
+    console.error("❌ Resend registration OTP error:", error)
     res.status(500).json({ error: error.message })
   }
 })

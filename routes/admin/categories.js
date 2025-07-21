@@ -1,89 +1,90 @@
 const express = require("express")
-const multer = require("multer")
-const path = require("path")
 const router = express.Router()
 
-// Configure multer for category images
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, "uploads/categories/")
-  },
-  filename: (req, file, cb) => {
-    cb(null, Date.now() + "-" + Math.round(Math.random() * 1e9) + path.extname(file.originalname))
-  },
-})
+// Assuming req.tenantModels.Category is available from storeContextMiddleware
+// and authMiddleware has already run for admin routes
 
-const upload = multer({ storage })
-
-// Get all categories
+// Get all categories for the tenant
 router.get("/", async (req, res) => {
   try {
-    const Category = require("../../models/tenant/Category")(req.tenantDB)
-    const categories = await Category.find().sort({ createdAt: -1 })
+    const Category = req.tenantModels.Category
+    const categories = await Category.find({})
     res.json(categories)
   } catch (error) {
-    res.status(500).json({ error: error.message })
+    console.error("❌ Error fetching categories:", error)
+    res.status(500).json({ error: "Failed to fetch categories" })
   }
 })
 
-// Create category
-router.post("/", upload.single("image"), async (req, res) => {
+// Get a single category by ID
+router.get("/:id", async (req, res) => {
   try {
-    const Category = require("../../models/tenant/Category")(req.tenantDB)
-
-    const { name, description } = req.body
-    const image = req.file ? `/uploads/categories/${req.file.filename}` : null
-
-    const category = new Category({
-      name,
-      description,
-      image,
-    })
-
-    await category.save()
-    res.status(201).json(category)
-  } catch (error) {
-    res.status(500).json({ error: error.message })
-  }
-})
-
-// Update category
-router.put("/:id", upload.single("image"), async (req, res) => {
-  try {
-    const Category = require("../../models/tenant/Category")(req.tenantDB)
-
-    const { name, description } = req.body
-    const updateData = { name, description }
-
-    if (req.file) {
-      updateData.image = `/uploads/categories/${req.file.filename}`
-    }
-
-    const category = await Category.findByIdAndUpdate(req.params.id, updateData, { new: true })
-
+    const Category = req.tenantModels.Category
+    const category = await Category.findById(req.params.id)
     if (!category) {
       return res.status(404).json({ error: "Category not found" })
     }
-
     res.json(category)
   } catch (error) {
-    res.status(500).json({ error: error.message })
+    console.error("❌ Error fetching category by ID:", error)
+    res.status(500).json({ error: "Failed to fetch category" })
   }
 })
 
-// Delete category
-router.delete("/:id", async (req, res) => {
+// Create a new category
+router.post("/", async (req, res) => {
   try {
-    const Category = require("../../models/tenant/Category")(req.tenantDB)
-    const category = await Category.findByIdAndDelete(req.params.id)
+    const Category = req.tenantModels.Category
+    const { name, description, imageUrl } = req.body
+    if (!name) {
+      return res.status(400).json({ error: "Category name is required" })
+    }
+    const newCategory = new Category({
+      tenantId: req.user.tenantId, // Assuming tenantId is available from auth middleware
+      name,
+      description,
+      imageUrl,
+    })
+    await newCategory.save()
+    res.status(201).json(newCategory)
+  } catch (error) {
+    console.error("❌ Error creating category:", error)
+    res.status(500).json({ error: "Failed to create category" })
+  }
+})
 
-    if (!category) {
+// Update a category by ID
+router.put("/:id", async (req, res) => {
+  try {
+    const Category = req.tenantModels.Category
+    const { name, description, imageUrl, isActive } = req.body
+    const updatedCategory = await Category.findByIdAndUpdate(
+      req.params.id,
+      { name, description, imageUrl, isActive },
+      { new: true, runValidators: true },
+    )
+    if (!updatedCategory) {
       return res.status(404).json({ error: "Category not found" })
     }
+    res.json(updatedCategory)
+  } catch (error) {
+    console.error("❌ Error updating category:", error)
+    res.status(500).json({ error: "Failed to update category" })
+  }
+})
 
+// Delete a category by ID
+router.delete("/:id", async (req, res) => {
+  try {
+    const Category = req.tenantModels.Category
+    const deletedCategory = await Category.findByIdAndDelete(req.params.id)
+    if (!deletedCategory) {
+      return res.status(404).json({ error: "Category not found" })
+    }
     res.json({ message: "Category deleted successfully" })
   } catch (error) {
-    res.status(500).json({ error: error.message })
+    console.error("❌ Error deleting category:", error)
+    res.status(500).json({ error: "Failed to delete category" })
   }
 })
 

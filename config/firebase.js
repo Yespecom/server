@@ -69,23 +69,35 @@ const initializeFirebase = () => {
 
 // Check if Firebase app is already initialized
 if (!admin.apps.length) {
-  admin.initializeApp({
-    credential: admin.credential.cert({
-      type: process.env.FIREBASE_TYPE,
-      project_id: process.env.FIREBASE_PROJECT_ID,
-      private_key_id: process.env.FIREBASE_PRIVATE_KEY_ID,
-      private_key: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"), // Handle newline characters
-      client_email: process.env.FIREBASE_CLIENT_EMAIL,
-      client_id: process.env.FIREBASE_CLIENT_ID,
-      auth_uri: process.env.FIREBASE_AUTH_URI,
-      token_uri: process.env.FIREBASE_TOKEN_URI,
-      auth_provider_x509_cert_url: process.env.FIREBASE_AUTH_PROVIDER_X509_CERT_URL,
-      client_x509_cert_url: process.env.FIREBASE_CLIENT_X509_CERT_URL,
-    }),
-  })
-  console.log("🔥 Firebase Admin SDK initialized.")
+  try {
+    // Parse the private key from environment variable
+    const privateKey = process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n")
+
+    admin.initializeApp({
+      credential: admin.credential.cert({
+        type: process.env.FIREBASE_TYPE,
+        project_id: process.env.FIREBASE_PROJECT_ID,
+        private_key_id: process.env.FIREBASE_PRIVATE_KEY_ID,
+        private_key: privateKey,
+        client_email: process.env.FIREBASE_CLIENT_EMAIL,
+        client_id: process.env.FIREBASE_CLIENT_ID,
+        auth_uri: process.env.FIREBASE_AUTH_URI,
+        token_uri: process.env.FIREBASE_TOKEN_URI,
+        auth_provider_x509_cert_url: process.env.FIREBASE_AUTH_PROVIDER_X509_CERT_URL,
+        client_x509_cert_url: process.env.FIREBASE_CLIENT_X509_CERT_URL,
+      }),
+      // You might need to add databaseURL or storageBucket if you're using other Firebase services
+      // databaseURL: "https://<DATABASE_NAME>.firebaseio.com",
+      // storageBucket: "gs://<BUCKET_NAME>.appspot.com",
+    })
+    console.log("✅ Firebase Admin SDK initialized successfully.")
+  } catch (error) {
+    console.error("❌ Error initializing Firebase Admin SDK:", error.message)
+    // It's crucial to handle this error, as other parts of your app might depend on Firebase
+    // process.exit(1); // Consider exiting if Firebase is critical
+  }
 } else {
-  console.log("🔥 Firebase Admin SDK already initialized.")
+  console.log("✅ Firebase Admin SDK already initialized.")
 }
 
 const auth = admin.auth()

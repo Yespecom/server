@@ -794,4 +794,51 @@ router.get("/analytics", async (req, res) => {
   }
 })
 
+// Get dashboard summary data
+router.get("/summary", async (req, res) => {
+  try {
+    const Order = req.tenantModels.Order
+    const Product = req.tenantModels.Product
+    const Customer = req.tenantModels.Customer
+
+    const tenantId = req.user.tenantId // Get tenantId from authenticated user
+
+    // Total orders
+    const totalOrders = await Order.countDocuments({ tenantId })
+
+    // Total sales (sum of totalAmount from completed orders)
+    const totalSalesResult = await Order.aggregate([
+      { $match: { tenantId, status: "delivered", paymentStatus: "paid" } },
+      { $group: { _id: null, total: { $sum: "$totalAmount" } } },
+    ])
+    const totalSales = totalSalesResult.length > 0 ? totalSalesResult[0].total : 0
+
+    // Total products
+    const totalProducts = await Product.countDocuments({ tenantId, isActive: true })
+
+    // Total customers
+    const totalCustomers = await Customer.countDocuments({ tenantId, isActive: true })
+
+    // Recent orders (e.g., last 5)
+    const recentOrders = await Order.find({ tenantId }).sort({ createdAt: -1 }).limit(5).populate("customerId")
+
+    // Products with low stock (e.g., stock < 10)
+    const lowStockProducts = await Product.find({ tenantId, stock: { $lt: 10 }, isActive: true })
+      .sort({ stock: 1 })
+      .limit(5)
+
+    res.json({
+      totalOrders,
+      totalSales,
+      totalProducts,
+      totalCustomers,
+      recentOrders,
+      lowStockProducts,
+    })
+  } catch (error) {
+    console.error("❌ Error fetching dashboard summary:", error)
+    res.status(500).json({ error: "Failed to fetch dashboard summary" })
+  }
+})
+
 module.exports = router

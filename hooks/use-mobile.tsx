@@ -5,7 +5,7 @@ import { useState, useEffect } from "react"
 const MOBILE_BREAKPOINT = 768
 
 export const useMobile = () => {
-  const [isMobile, setIsMobile] = useState<boolean | undefined>(undefined)
+  const [isMobile, setIsMobile] = useState(false)
 
   useEffect(() => {
     const checkMobile = () => {
@@ -20,5 +20,5 @@ export const useMobile = () => {
     }
   }, [])
 
-  return !!isMobile
+  return isMobile
 }

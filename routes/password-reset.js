@@ -1,9 +1,11 @@
 const express = require("express")
 const bcrypt = require("bcryptjs")
-const User = require("../models/User")
+const { getMainDb } = require("../db/connection")
+const User = require("../models/User") // Import the User model function
 const OTP = require("../models/OTP")
-const { getTenantDB } = require("../config/tenantDB")
 const { sendOTPEmail } = require("../config/email")
+const { getTenantDB } = require("../config/tenantDB") // For updating tenant user password
+
 const router = express.Router()
 
 // Send OTP for password reset
@@ -23,8 +25,11 @@ router.post("/forgot-password", async (req, res) => {
       return res.status(400).json({ error: "Invalid email format" })
     }
 
+    const mainConnection = getMainDb()
+    const UserModel = User(mainConnection)
+
     // Check if user exists in main DB
-    const existingUser = await User.findOne({ email })
+    const existingUser = await UserModel.findOne({ email })
     if (!existingUser) {
       return res.status(404).json({ error: "No account found with this email address" })
     }
@@ -87,8 +92,11 @@ router.post("/verify-reset-otp", async (req, res) => {
       })
     }
 
+    const mainConnection = getMainDb()
+    const UserModel = User(mainConnection)
+
     // Check if user still exists
-    const user = await User.findOne({ email })
+    const user = await UserModel.findOne({ email })
     if (!user) {
       return res.status(404).json({ error: "User not found" })
     }
@@ -164,8 +172,11 @@ router.post("/reset-password", async (req, res) => {
       })
     }
 
+    const mainConnection = getMainDb()
+    const UserModel = User(mainConnection)
+
     // Find user in main DB
-    const mainUser = await User.findOne({ email })
+    const mainUser = await UserModel.findOne({ email })
     if (!mainUser) {
       console.log(`❌ User not found in main DB: ${email}`)
       return res.status(404).json({ error: "User not found" })
@@ -181,8 +192,8 @@ router.post("/reset-password", async (req, res) => {
     // Update password in tenant DB as well
     try {
       const tenantDB = await getTenantDB(mainUser.tenantId)
-      const TenantUser = require("../models/tenant/User")(tenantDB)
-      const tenantUser = await TenantUser.findOne({ email })
+      const TenantUserModel = require("../models/tenant/User")(tenantDB) // Get tenant user model
+      const tenantUser = await TenantUserModel.findOne({ email })
 
       if (tenantUser) {
         tenantUser.password = newPassword // This will be hashed by the pre-save middleware
@@ -193,7 +204,7 @@ router.post("/reset-password", async (req, res) => {
       }
     } catch (tenantError) {
       console.error("❌ Error updating tenant password:", tenantError)
-      // Don't fail the request if tenant update fails
+      // Don't fail the request if tenant update fails, log it instead
     }
 
     // NOW delete the OTP after successful password reset
@@ -236,8 +247,11 @@ router.post("/resend-reset-otp", async (req, res) => {
       })
     }
 
+    const mainConnection = getMainDb()
+    const UserModel = User(mainConnection)
+
     // Check if user exists
-    const existingUser = await User.findOne({ email })
+    const existingUser = await UserModel.findOne({ email })
     if (!existingUser) {
       return res.status(404).json({ error: "No account found with this email address" })
     }

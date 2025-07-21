@@ -2,16 +2,18 @@ const mongoose = require("mongoose")
 
 const orderSchema = new mongoose.Schema(
   {
+    tenantId: { type: String, required: true },
     orderId: {
       type: String,
       required: true,
       unique: true,
     },
+    customerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Customer",
+      required: true,
+    },
     customer: {
-      id: {
-        type: mongoose.Schema.Types.ObjectId,
-        required: true,
-      },
       name: {
         type: String,
         required: true,
@@ -24,55 +26,17 @@ const orderSchema = new mongoose.Schema(
         type: String,
         required: true,
       },
-      address: {
-        name: String,
-        street: {
-          type: String,
-          required: true,
-        },
-        landmark: String,
-        city: {
-          type: String,
-          required: true,
-        },
-        state: {
-          type: String,
-          required: true,
-        },
-        pincode: {
-          type: String,
-          required: true,
-        },
-        country: {
-          type: String,
-          default: "India",
-        },
-      },
     },
-    items: [
+    products: [
       {
-        product: {
+        productId: {
           type: mongoose.Schema.Types.ObjectId,
           ref: "Product",
           required: true,
         },
-        name: {
-          type: String,
-          required: true,
-        },
-        price: {
-          type: Number,
-          required: true,
-        },
-        quantity: {
-          type: Number,
-          required: true,
-          min: 1,
-        },
-        total: {
-          type: Number,
-          required: true,
-        },
+        name: { type: String, required: true },
+        quantity: { type: Number, required: true, min: 1 },
+        price: { type: Number, required: true, min: 0 },
       },
     ],
     subtotal: {
@@ -87,10 +51,7 @@ const orderSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
-    totalAmount: {
-      type: Number,
-      required: true,
-    },
+    totalAmount: { type: Number, required: true, min: 0 },
     appliedOffer: {
       id: {
         type: mongoose.Schema.Types.ObjectId,
@@ -103,19 +64,20 @@ const orderSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ["pending", "confirmed", "processing", "shipped", "delivered", "cancelled"],
+      enum: ["pending", "processing", "shipped", "delivered", "cancelled"],
       default: "pending",
     },
-    paymentMethod: {
-      type: String,
-      enum: ["razorpay", "stripe", "cod"],
-      default: "cod",
-    },
-    paymentId: String,
     paymentStatus: {
       type: String,
-      enum: ["pending", "processing", "success", "failed", "cancelled"],
+      enum: ["pending", "paid", "refunded"],
       default: "pending",
+    },
+    shippingAddress: {
+      street: String,
+      city: String,
+      state: String,
+      zip: String,
+      country: String,
     },
     notes: String,
     trackingNumber: String,
@@ -127,15 +89,14 @@ const orderSchema = new mongoose.Schema(
 
 // Indexes for better performance
 orderSchema.index({ orderId: 1 })
-orderSchema.index({ "customer.id": 1 })
-orderSchema.index({ "customer.email": 1 })
+orderSchema.index({ customerId: 1 })
 orderSchema.index({ status: 1 })
 orderSchema.index({ paymentStatus: 1 })
 orderSchema.index({ createdAt: -1 })
 
 // Virtual for order total items count
 orderSchema.virtual("itemsCount").get(function () {
-  return this.items.reduce((total, item) => total + item.quantity, 0)
+  return this.products.reduce((total, product) => total + product.quantity, 0)
 })
 
 // Instance methods
@@ -154,7 +115,7 @@ orderSchema.methods.updatePaymentStatus = function (newStatus, paymentId = null)
 
 // Static methods
 orderSchema.statics.findByCustomer = function (customerId) {
-  return this.find({ "customer.id": customerId }).sort({ createdAt: -1 })
+  return this.find({ customerId }).sort({ createdAt: -1 })
 }
 
 orderSchema.statics.findByStatus = function (status) {
@@ -168,4 +129,4 @@ orderSchema.statics.getTotalRevenue = function () {
   ])
 }
 
-module.exports = (connection) => connection.model("Order", orderSchema)
+module.exports = (connection) => connection.models.Order || connection.model("Order", orderSchema)

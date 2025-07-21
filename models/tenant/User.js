@@ -1,71 +1,49 @@
 const mongoose = require("mongoose")
 const bcrypt = require("bcryptjs")
 
-const tenantUserSchema = new mongoose.Schema(
-  {
-    name: {
-      type: String,
-      required: true,
-      trim: true,
-    },
-    email: {
-      type: String,
-      required: true,
-      unique: true,
-      lowercase: true,
-    },
-    phone: {
-      type: String,
-      required: true,
-    },
-    password: {
-      type: String,
-      required: true,
-      minlength: 6,
-    },
-    role: {
-      type: String,
-      enum: ["owner", "admin", "staff"],
-      default: "owner",
-    },
-    hasStore: {
-      type: Boolean,
-      default: false,
-    },
-    storeInfo: {
-      name: String,
-      logo: String,
-      banner: String,
-      storeId: String,
-      industry: String,
+module.exports = (connection) => {
+  const tenantUserSchema = new mongoose.Schema(
+    {
+      tenantId: { type: String, required: true },
+      email: {
+        type: String,
+        required: true,
+        unique: true, // Unique within the tenant's user collection
+        lowercase: true,
+        trim: true,
+      },
+      password: {
+        type: String,
+        required: true,
+      },
+      name: { type: String },
+      phone: { type: String },
+      role: {
+        type: String,
+        enum: ["customer", "staff", "admin"], // Roles within the tenant's context
+        default: "customer",
+      },
       isActive: {
         type: Boolean,
-        default: false,
+        default: true,
       },
     },
-    permissions: {
-      products: { type: Boolean, default: true },
-      orders: { type: Boolean, default: true },
-      customers: { type: Boolean, default: true },
-      offers: { type: Boolean, default: true },
-      categories: { type: Boolean, default: true },
-      settings: { type: Boolean, default: true },
-      payments: { type: Boolean, default: true },
-    },
-  },
-  {
-    timestamps: true,
-  },
-)
+    { timestamps: true },
+  )
 
-tenantUserSchema.pre("save", async function (next) {
-  if (!this.isModified("password")) return next()
-  this.password = await bcrypt.hash(this.password, 12)
-  next()
-})
+  // Hash password before saving
+  tenantUserSchema.pre("save", async function (next) {
+    if (!this.isModified("password")) {
+      return next()
+    }
+    try {
+      const salt = await bcrypt.genSalt(12)
+      this.password = await bcrypt.hash(this.password, salt)
+      next()
+    } catch (err) {
+      next(err)
+    }
+  })
 
-tenantUserSchema.methods.comparePassword = async function (password) {
-  return bcrypt.compare(password, this.password)
+  return connection.models.TenantUser || connection.model("TenantUser", tenantUserSchema)
 }
-
-module.exports = (connection) => connection.model("TenantUser", tenantUserSchema)

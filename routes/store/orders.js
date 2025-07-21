@@ -44,370 +44,103 @@ router.get("/test", (req, res) => {
 })
 
 // Middleware to authenticate customer
-const customerAuthMiddleware = async (req, res, next) => {
-  try {
-    const token = req.header("Authorization")?.replace("Bearer ", "")
-
-    if (!token) {
-      return res.status(401).json({ error: "Access denied. Please login." })
-    }
-
-    const jwt = require("jsonwebtoken")
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || "your-secret-key")
-
-    if (decoded.type !== "customer") {
-      return res.status(401).json({ error: "Invalid token type" })
-    }
-
-    // Verify store context from token matches URL parameter
-    if (decoded.storeId !== req.storeId) {
-      console.error("❌ Token storeId mismatch with URL storeId:", {
-        tokenStoreId: decoded.storeId,
-        urlStoreId: req.storeId,
-      })
-      return res.status(401).json({ error: "Access denied. Token is not valid for this store." })
-    }
-
-    // req.tenantDB and req.storeId are already set by the parent storeContextMiddleware
-    if (!req.tenantDB || !req.storeId) {
-      console.error("❌ Missing store context in orders route (should be set by parent middleware):", {
-        hasTenantDB: !!req.tenantDB,
-        storeId: req.storeId,
-        tenantId: req.tenantId,
-      })
-      return res.status(500).json({ error: "Internal server error: Store context not available." })
-    }
-
-    // Get customer from tenant database
-    const Customer = require("../../models/tenant/Customer")(req.tenantDB)
-    const customer = await Customer.findById(decoded.customerId)
-
-    if (!customer) {
-      return res.status(401).json({ error: "Customer not found" })
-    }
-
-    req.customer = customer
-    req.customerId = customer._id
-
-    next()
-  } catch (error) {
-    console.error("❌ Customer auth error:", error)
-    if (error.name === "JsonWebTokenError" || error.name === "TokenExpiredError") {
-      return res.status(401).json({ error: "Invalid or expired token" })
-    }
-    res.status(500).json({ error: "Authentication failed" })
-  }
-}
-
-// Generate unique order ID
-const generateOrderId = () => {
-  const timestamp = Date.now().toString()
-  const random = Math.random().toString(36).substring(2, 8).toUpperCase()
-  return `ORD-${timestamp.slice(-6)}${random}`
-}
+const customerAuthMiddleware = require("../../middleware/customerAuth") // Assuming customer auth is needed for creating/viewing orders
 
 // Create new order
 router.post("/", customerAuthMiddleware, async (req, res) => {
   try {
-    console.log(`📦 Creating order for customer: ${req.customer.email}`)
+    const Order = req.tenantModels.Order
+    const Product = req.tenantModels.Product
+    const { products, shippingAddress, notes } = req.body
 
-    const { items, shippingAddress, addressId, paymentMethod = "cod", offerId } = req.body
-
-    // Validate required fields
-    if (!items || !Array.isArray(items) || items.length === 0) {
-      console.error("❌ No items provided in order")
-      return res.status(400).json({ error: "Order items are required" })
+    if (!products || products.length === 0) {
+      return res.status(400).json({ error: "Order must contain products" })
     }
 
-    // Validate each item has required fields
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i]
-      if (!item.productId) {
-        console.error(`❌ Item ${i} missing productId:`, item)
-        return res.status(400).json({
-          error: `Item ${i + 1} is missing product ID`,
-          item: item,
-        })
-      }
-      if (!item.quantity || item.quantity <= 0) {
-        console.error(`❌ Item ${i} invalid quantity:`, item)
-        return res.status(400).json({
-          error: `Item ${i + 1} has invalid quantity`,
-          item: item,
-        })
-      }
-    }
+    let totalAmount = 0
+    const orderProducts = []
 
-    // Handle shipping address - either from addressId or direct address object
-    let finalShippingAddress = null
-
-    if (addressId) {
-      // Use existing address from customer's saved addresses
-      const customerAddress = req.customer.addresses.id(addressId)
-      if (!customerAddress) {
-        return res.status(400).json({ error: "Selected address not found" })
-      }
-      finalShippingAddress = {
-        name: customerAddress.name,
-        street: customerAddress.street,
-        landmark: customerAddress.landmark,
-        city: customerAddress.city,
-        state: customerAddress.state,
-        pincode: customerAddress.pincode,
-        country: customerAddress.country,
-      }
-    } else if (shippingAddress) {
-      // Use provided address object
-      if (!shippingAddress.street || !shippingAddress.city || !shippingAddress.state || !shippingAddress.pincode) {
-        return res.status(400).json({
-          error: "Complete shipping address is required (street, city, state, pincode)",
-        })
-      }
-      finalShippingAddress = {
-        name: shippingAddress.name || req.customer.name,
-        street: shippingAddress.street,
-        landmark: shippingAddress.landmark || "",
-        city: shippingAddress.city,
-        state: shippingAddress.state,
-        pincode: shippingAddress.pincode,
-        country: shippingAddress.country || "India",
-      }
-    } else {
-      // Use customer's default address
-      const defaultAddress = req.customer.getDefaultAddress()
-      if (!defaultAddress) {
-        return res.status(400).json({
-          error: "No shipping address provided and no saved addresses found. Please add an address first.",
-        })
-      }
-      finalShippingAddress = {
-        name: defaultAddress.name,
-        street: defaultAddress.street,
-        landmark: defaultAddress.landmark,
-        city: defaultAddress.city,
-        state: defaultAddress.state,
-        pincode: defaultAddress.pincode,
-        country: defaultAddress.country,
-      }
-    }
-
-    const { Product, Order, Offer } = req.models
-
-    // Validate and calculate order items
-    const orderItems = []
-    let subtotal = 0
-
-    for (const item of items) {
-      console.log(`🔍 Processing item with productId: ${item.productId}`)
-
-      const product = await Product.findById(item.productId)
+    // Validate products and calculate total amount
+    for (const item of products) {
+      const product = await Product.findOne({ _id: item.productId, tenantId: req.tenantId, isActive: true })
       if (!product) {
-        console.error(`❌ Product not found: ${item.productId}`)
-        return res.status(404).json({ error: `Product not found: ${item.productId}` })
+        return res.status(404).json({ error: `Product with ID ${item.productId} not found or inactive` })
       }
-
-      console.log(`✅ Found product: ${product.name}`)
-
-      if (!product.isActive) {
-        return res.status(400).json({ error: `Product is not available: ${product.name}` })
-      }
-
       if (product.stock < item.quantity) {
-        return res.status(400).json({
-          error: `Insufficient stock for ${product.name}. Available: ${product.stock}`,
-        })
+        return res.status(400).json({ error: `Not enough stock for product: ${product.name}` })
       }
 
-      const itemTotal = product.price * item.quantity
-      subtotal += itemTotal
-
-      orderItems.push({
-        product: product._id,
+      const itemPrice = product.price * item.quantity
+      totalAmount += itemPrice
+      orderProducts.push({
+        productId: product._id,
         name: product.name,
-        price: product.price,
         quantity: item.quantity,
-        total: itemTotal,
+        price: product.price,
       })
+
+      // Decrease product stock (simple stock management)
+      product.stock -= item.quantity
+      await product.save()
     }
 
-    console.log(`💰 Order calculation: subtotal=${subtotal}, items=${orderItems.length}`)
-
-    // Apply offer if provided
-    let discount = 0
-    let appliedOffer = null
-
-    if (offerId) {
-      const offer = await Offer.findById(offerId)
-      if (offer && offer.isActive) {
-        const currentDate = new Date()
-        if (currentDate >= offer.validFrom && currentDate <= offer.validTo) {
-          if (subtotal >= offer.minOrderAmount) {
-            if (offer.type === "percentage") {
-              discount = (subtotal * offer.value) / 100
-              if (offer.maxDiscount && discount > offer.maxDiscount) {
-                discount = offer.maxDiscount
-              }
-            } else if (offer.type === "flat") {
-              discount = offer.value
-            }
-            appliedOffer = {
-              id: offer._id,
-              name: offer.name,
-              type: offer.type,
-              value: offer.value,
-              discount: Math.round(discount),
-            }
-          }
-        }
-      }
-    }
-
-    // Calculate shipping (get from settings)
-    const Settings = require("../../models/tenant/Settings")(req.tenantDB)
-    const settings = await Settings.findOne()
-    let shippingCharges = settings?.shipping?.charges || 50
-
-    // Free shipping check
-    if (settings?.shipping?.freeShippingAbove && subtotal >= settings.shipping.freeShippingAbove) {
-      shippingCharges = 0
-    }
-
-    const totalAmount = Math.round(subtotal - discount + shippingCharges)
-
-    // Generate order ID
-    const orderId = generateOrderId()
-
-    console.log(`📦 Creating order with ID: ${orderId}`)
-
-    // Create order with updated address structure
-    const order = new Order({
-      orderId,
-      customer: {
-        id: req.customer._id,
-        name: req.customer.name,
-        email: req.customer.email,
-        phone: req.customer.phone,
-        address: finalShippingAddress,
-      },
-      items: orderItems,
-      subtotal: Math.round(subtotal),
-      discount: Math.round(discount),
-      shippingCharges,
+    const newOrder = new Order({
+      tenantId: req.tenantId,
+      customerId: req.customer.customerId, // From customerAuthMiddleware
+      products: orderProducts,
       totalAmount,
-      appliedOffer,
-      paymentMethod,
-      status: paymentMethod === "cod" ? "confirmed" : "pending",
-      paymentStatus: paymentMethod === "cod" ? "pending" : "pending",
+      shippingAddress,
+      notes,
+      status: "pending", // Initial status
+      paymentStatus: "pending", // Initial payment status
     })
 
-    await order.save()
-    console.log(`✅ Order saved with ID: ${order._id}`)
+    await newOrder.save()
 
-    // Update product stock
-    for (const item of orderItems) {
-      await Product.findByIdAndUpdate(item.product, {
-        $inc: { stock: -item.quantity, sales: item.quantity },
-      })
-    }
-
-    // Update customer stats
-    await req.customer.updateSpent(totalAmount)
-
-    // Update offer usage if applied
-    if (appliedOffer) {
-      await Offer.findByIdAndUpdate(offerId, {
-        $inc: { usedCount: 1 },
-      })
-    }
-
-    console.log(`✅ Order created successfully: ${orderId}`)
-
-    // Send order confirmation (if SMS/Email is configured)
-    try {
-      const { sendOrderConfirmationSMS } = require("../../config/sms")
-      if (req.customer.phone) {
-        await sendOrderConfirmationSMS(req.customer.phone, orderId, req.storeInfo?.name || "Store")
-      }
-    } catch (smsError) {
-      console.error("SMS sending failed:", smsError)
-      // Don't fail the order if SMS fails
-    }
-
-    res.status(201).json({
-      message: "Order created successfully",
-      order: {
-        id: order._id,
-        orderId: order.orderId,
-        totalAmount: order.totalAmount,
-        status: order.status,
-        paymentMethod: order.paymentMethod,
-        paymentStatus: order.paymentStatus,
-        shippingAddress: finalShippingAddress,
-        createdAt: order.createdAt,
-      },
+    // Optionally update customer's total orders/spent
+    const Customer = req.tenantModels.Customer
+    await Customer.findByIdAndUpdate(req.customer.customerId, {
+      $inc: { totalOrders: 1, totalSpent: totalAmount },
     })
+
+    res.status(201).json(newOrder)
   } catch (error) {
-    console.error("❌ Create order error:", error)
-    res.status(500).json({
-      error: "Failed to create order",
-      details: error.message,
-      stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
-    })
+    console.error("❌ Error creating order:", error)
+    res.status(500).json({ error: "Failed to create order" })
   }
 })
 
-// Get customer orders
+// Get customer's orders (requires customer authentication)
 router.get("/", customerAuthMiddleware, async (req, res) => {
   try {
-    const { page = 1, limit = 10, status } = req.query
-    const { Order } = req.models
-
-    const query = { "customer.id": req.customerId }
-    if (status) {
-      query.status = status
-    }
-
-    const orders = await Order.find(query)
-      .populate("items.product", "name thumbnail")
-      .sort({ createdAt: -1 })
-      .limit(limit * 1)
-      .skip((page - 1) * limit)
-
-    const total = await Order.countDocuments(query)
-
-    res.json({
-      orders,
-      pagination: {
-        page: Number.parseInt(page),
-        limit: Number.parseInt(limit),
-        total,
-        pages: Math.ceil(total / limit),
-      },
-    })
+    const Order = req.tenantModels.Order
+    const orders = await Order.find({
+      tenantId: req.tenantId,
+      customerId: req.customer.customerId,
+    }).populate("products.productId")
+    res.json(orders)
   } catch (error) {
-    console.error("❌ Get orders error:", error)
-    res.status(500).json({ error: error.message })
+    console.error("❌ Error fetching customer orders:", error)
+    res.status(500).json({ error: "Failed to fetch orders" })
   }
 })
 
-// Get specific order details
-router.get("/:orderId", customerAuthMiddleware, async (req, res) => {
+// Get a single order by ID for the customer (requires customer authentication)
+router.get("/:id", customerAuthMiddleware, async (req, res) => {
   try {
-    const { Order } = req.models
-
+    const Order = req.tenantModels.Order
     const order = await Order.findOne({
-      orderId: req.params.orderId,
-      "customer.id": req.customerId,
-    }).populate("items.product", "name thumbnail slug")
-
+      _id: req.params.id,
+      tenantId: req.tenantId,
+      customerId: req.customer.customerId,
+    }).populate("products.productId")
     if (!order) {
       return res.status(404).json({ error: "Order not found" })
     }
-
     res.json(order)
   } catch (error) {
-    console.error("❌ Get order details error:", error)
-    res.status(500).json({ error: error.message })
+    console.error("❌ Error fetching single customer order:", error)
+    res.status(500).json({ error: "Failed to fetch order" })
   }
 })
 

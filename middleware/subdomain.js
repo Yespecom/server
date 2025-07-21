@@ -1,32 +1,26 @@
 const subdomain = require("express-subdomain")
 
-// This middleware is designed to handle dynamic subdomains for multi-tenant applications.
-// It captures the subdomain and makes it available in req.tenantId.
-// For example, if the request is to 'store1.yourdomain.com', req.tenantId will be 'store1'.
-// It also ensures that requests to 'www.yourdomain.com' or 'yourdomain.com' are treated as main app requests.
+// This middleware is designed to extract a subdomain and attach it to req.tenantId
+// It assumes your application is hosted in a way that subdomains resolve to your server.
+// For example, if your app is at app.example.com, and a store is at mystore.app.example.com,
+// then 'mystore' would be extracted as the tenantId.
 
 const subdomainMiddleware = (req, res, next) => {
-  const host = req.hostname
+  const host = req.get("host")
   const parts = host.split(".")
 
-  // Check if it's localhost or a direct IP address
-  if (parts.length === 1 || (parts.length === 4 && parts.every((part) => !isNaN(Number.parseInt(part))))) {
-    req.tenantId = null // No subdomain for localhost or IP
-    return next()
-  }
-
-  // Determine the base domain (e.g., 'yourdomain.com' from 'store1.yourdomain.com')
-  // This assumes a TLD like .com, .org, .net. For more complex TLDs (e.g., .co.uk),
-  // you might need a more sophisticated library like 'tldjs'.
-  const baseDomain = parts.slice(-2).join(".") // e.g., 'yourdomain.com'
-
-  // If the host is just the base domain (e.g., 'yourdomain.com' or 'www.yourdomain.com')
-  // or if it's 'localhost', treat it as the main application.
-  if (parts.length <= 2 || parts[0] === "www") {
-    req.tenantId = null // Main application
+  // Assuming a structure like 'subdomain.domain.com' or 'subdomain.localhost'
+  // This logic might need adjustment based on your actual domain setup (e.g., .co.uk)
+  if (parts.length >= 3 && parts[0] !== "www" && parts[0] !== "api" && parts[0] !== "localhost") {
+    req.tenantId = parts[0] // The first part is the subdomain
+    console.log(`🌐 Subdomain detected: ${req.tenantId}`)
+  } else if (req.params.storeId) {
+    // If no subdomain, but a storeId is present in the URL path (e.g., /api/STOREID/...)
+    req.tenantId = req.params.storeId
+    console.log(`🌐 Tenant ID from URL path: ${req.tenantId}`)
   } else {
-    // The first part is the subdomain
-    req.tenantId = parts[0]
+    req.tenantId = null // No specific tenant identified
+    console.log("🌐 No specific tenant ID detected from subdomain or URL path.")
   }
 
   next()

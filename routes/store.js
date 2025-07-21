@@ -98,146 +98,83 @@ router.use("/orders", ordersRoutes)
 // Mount payments routes
 router.use("/payments", paymentsRoutes)
 
-// Get products for storefront
-router.get("/products", async (req, res) => {
+// Example store root route (e.g., for fetching general store info)
+router.get("/", async (req, res) => {
   try {
-    console.log(`🛍️ Getting products for store: ${req.storeId}`)
-    console.log(`🔍 Request context:`, {
-      storeId: req.storeId,
-      tenantId: req.tenantId,
-      hasTenantDB: !!req.tenantDB,
-      dbState: req.tenantDB?.readyState,
-      dbName: req.tenantDB?.name,
-      hasModels: !!req.models,
+    const Settings = req.models.Settings
+    const storeSettings = await Settings.findOne({ tenantId: req.tenantId })
+    if (!storeSettings) {
+      return res.status(404).json({ error: "Store not found or settings not configured." })
+    }
+    res.json({
+      message: `Welcome to ${storeSettings.storeName}!`,
+      storeInfo: {
+        name: storeSettings.storeName,
+        logo: storeSettings.logoUrl,
+        contactEmail: storeSettings.contactEmail,
+        currency: storeSettings.currency,
+        // ... other public settings
+      },
     })
-
-    if (!req.tenantDB) {
-      console.error("❌ No tenant database connection")
-      return res.status(500).json({
-        error: "Database connection not available",
-        storeId: req.storeId,
-        tenantId: req.tenantId,
-      })
-    }
-
-    if (!req.models) {
-      console.error("❌ Models not initialized")
-      return res.status(500).json({
-        error: "Database models not initialized",
-        storeId: req.storeId,
-        tenantId: req.tenantId,
-      })
-    }
-
-    const { Product } = req.models
-
-    // Try to get products with populate, fallback to without populate if it fails
-    let products
-    try {
-      products = await Product.find({ isActive: true }).populate("category").populate("offer").sort({ createdAt: -1 })
-      console.log(`📦 Found ${products.length} products with populate for store: ${req.storeId}`)
-    } catch (populateError) {
-      console.log(`⚠️ Populate failed, loading products without populate:`, populateError.message)
-      try {
-        products = await Product.find({ isActive: true }).sort({ createdAt: -1 })
-        console.log(`📦 Found ${products.length} products without populate for store: ${req.storeId}`)
-      } catch (basicError) {
-        console.error("❌ Failed to load products even without populate:", basicError)
-        return res.status(500).json({
-          error: "Failed to load products",
-          details: basicError.message,
-          storeId: req.storeId,
-        })
-      }
-    }
-
-    res.json(products)
   } catch (error) {
-    console.error("❌ Error getting products:", error)
-    res.status(500).json({
-      error: error.message,
-      storeId: req.storeId,
-      tenantId: req.tenantId,
-      stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
-    })
+    console.error("❌ Error fetching store info:", error)
+    res.status(500).json({ error: "Failed to fetch store information" })
   }
 })
 
-// Get product details
+// Get all products for the store (publicly accessible)
+router.get("/products", async (req, res) => {
+  try {
+    const Product = req.models.Product
+    const products = await Product.find({ tenantId: req.tenantId, isActive: true }).populate("category")
+    res.json(products)
+  } catch (error) {
+    console.error("❌ Error fetching store products:", error)
+    res.status(500).json({ error: "Failed to fetch products" })
+  }
+})
+
+// Get a single product by ID for the store (publicly accessible)
 router.get("/products/:id", async (req, res) => {
   try {
-    const { Product } = req.models
-
-    let product
-    try {
-      product = await Product.findById(req.params.id).populate("category").populate("offer")
-    } catch (populateError) {
-      console.log(`⚠️ Populate failed for product details, loading without populate`)
-      product = await Product.findById(req.params.id)
-    }
-
+    const Product = req.models.Product
+    const product = await Product.findOne({ _id: req.params.id, tenantId: req.tenantId, isActive: true }).populate(
+      "category",
+    )
     if (!product) {
       return res.status(404).json({ error: "Product not found" })
     }
-
-    // Increment product views
-    try {
-      await product.incrementViews()
-    } catch (viewError) {
-      console.error("Error incrementing views:", viewError)
-      // Don't fail the request if view increment fails
-    }
-
     res.json(product)
   } catch (error) {
-    res.status(500).json({ error: error.message })
+    console.error("❌ Error fetching single store product:", error)
+    res.status(500).json({ error: "Failed to fetch product" })
   }
 })
 
-// Search products
-router.get("/search", async (req, res) => {
-  try {
-    const { q } = req.query
-    const { Product } = req.models
-
-    const products = await Product.find({
-      isActive: true,
-      $or: [{ name: { $regex: q, $options: "i" } }, { description: { $regex: q, $options: "i" } }],
-    })
-      .populate("category")
-      .populate("offer")
-
-    res.json(products)
-  } catch (error) {
-    res.status(500).json({ error: error.message })
-  }
-})
-
-// Get categories
+// Get all categories for the store (publicly accessible)
 router.get("/categories", async (req, res) => {
   try {
-    const { Category } = req.models
-    const categories = await Category.find({ isActive: true })
+    const Category = req.models.Category
+    const categories = await Category.find({ tenantId: req.tenantId, isActive: true })
     res.json(categories)
   } catch (error) {
-    res.status(500).json({ error: error.message })
+    console.error("❌ Error fetching store categories:", error)
+    res.status(500).json({ error: "Failed to fetch categories" })
   }
 })
 
-// Get products by category
-router.get("/categories/:id/products", async (req, res) => {
+// Get a single category by ID for the store (publicly accessible)
+router.get("/categories/:id", async (req, res) => {
   try {
-    const { Product } = req.models
-    const products = await Product.find({
-      category: req.params.id,
-      isActive: true,
-    })
-      .populate("category")
-      .populate("offer")
-
-    res.json(products)
+    const Category = req.models.Category
+    const category = await Category.findOne({ _id: req.params.id, tenantId: req.tenantId, isActive: true })
+    if (!category) {
+      return res.status(404).json({ error: "Category not found" })
+    }
+    res.json(category)
   } catch (error) {
-    res.status(500).json({ error: error.message })
+    console.error("❌ Error fetching single store category:", error)
+    res.status(500).json({ error: "Failed to fetch category" })
   }
 })
 

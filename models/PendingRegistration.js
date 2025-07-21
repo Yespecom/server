@@ -1,13 +1,7 @@
 const mongoose = require("mongoose")
-const bcrypt = require("bcryptjs")
 
-const pendingRegistrationSchema = new mongoose.Schema(
+const PendingRegistrationSchema = new mongoose.Schema(
   {
-    name: {
-      type: String,
-      required: true,
-      trim: true,
-    },
     email: {
       type: String,
       required: true,
@@ -15,22 +9,23 @@ const pendingRegistrationSchema = new mongoose.Schema(
       lowercase: true,
       trim: true,
     },
-    phone: {
+    status: {
       type: String,
-      default: "",
-    },
-    password: {
-      type: String,
-      required: true,
+      enum: ["pending", "verified", "completed"],
+      default: "pending",
     },
     expiresAt: {
       type: Date,
-      default: () => new Date(Date.now() + 10 * 60 * 1000), // Expires in 10 minutes
+      required: true,
+    },
+    verifiedAt: {
+      type: Date,
     },
   },
-  {
-    timestamps: true,
-  },
+  { timestamps: true },
 )
 
-module.exports = mongoose.model("PendingRegistration", pendingRegistrationSchema)
+// Index for faster lookup and cleanup
+PendingRegistrationSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 }) // Automatically delete expired documents
+
+module.exports = mongoose.model("PendingRegistration", PendingRegistrationSchema)

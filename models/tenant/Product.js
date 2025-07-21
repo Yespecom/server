@@ -2,6 +2,7 @@ const mongoose = require("mongoose")
 
 const productSchema = new mongoose.Schema(
   {
+    tenantId: { type: String, required: true }, // New field for tenantId
     name: {
       type: String,
       required: [true, "Product name is required"],
@@ -19,6 +20,7 @@ const productSchema = new mongoose.Schema(
       type: String,
       required: [true, "SKU is required"],
       unique: true,
+      sparse: true, // Unique if present
       uppercase: true,
       trim: true,
       maxlength: [50, "SKU cannot exceed 50 characters"],
@@ -96,6 +98,7 @@ const productSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    imageUrl: { type: String }, // New field for imageUrl
     thumbnail: {
       type: String,
       trim: true,
@@ -385,7 +388,7 @@ productSchema.index({ name: "text", description: "text", shortDescription: "text
 productSchema.index({ category: 1, isActive: 1 })
 productSchema.index({ isActive: 1, status: 1 })
 productSchema.index({ slug: 1 }, { unique: true })
-productSchema.index({ sku: 1 }, { unique: true })
+productSchema.index({ sku: 1 }, { unique: true, sparse: true }) // Updated index for sku
 productSchema.index({ price: 1 })
 productSchema.index({ createdAt: -1 })
 productSchema.index({ sales: -1 })
@@ -399,4 +402,4 @@ productSchema.index({ category: 1, price: 1 })
 productSchema.index({ isActive: 1, status: 1, createdAt: -1 })
 productSchema.index({ category: 1, isActive: 1, status: 1 })
 
-module.exports = (connection) => connection.model("Product", productSchema)
+module.exports = (connection) => connection.models.Product || connection.model("Product", productSchema)

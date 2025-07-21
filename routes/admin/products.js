@@ -1,6 +1,7 @@
 const express = require("express")
 const multer = require("multer")
 const router = express.Router()
+const cloudinary = require("../../config/cloudinary") // Assuming cloudinary config is available
 const { upload, deleteImage, getPublicIdFromUrl } = require("../../config/cloudinary")
 const fs = require("fs")
 const path = require("path")
@@ -19,6 +20,11 @@ const testUpload = multer({
       cb(new Error("Only image files are allowed!"), false)
     }
   },
+})
+
+const uploadSingle = multer({
+  storage: storage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB file size limit
 })
 
 // Helper functions for data parsing
@@ -212,346 +218,133 @@ router.get("/test-connection", async (req, res) => {
   }
 })
 
-// Get all products
+// Get all products for the tenant
 router.get("/", async (req, res) => {
   try {
-    console.log("🔍 Getting all products...")
-
-    // Ensure all models are loaded
-    const { Product } = ensureModelsLoaded(req.tenantDB)
-
-    // Try to get products with populate, fallback to without populate
-    let products
-    try {
-      products = await Product.find().populate("category").populate("offer").sort({ createdAt: -1 })
-      console.log("✅ Products loaded with populate")
-    } catch (populateError) {
-      console.log("⚠️ Populate failed, loading without populate:", populateError.message)
-      products = await Product.find().sort({ createdAt: -1 })
-    }
-
-    console.log(`✅ Found ${products.length} products`)
+    const Product = req.tenantModels.Product
+    const products = await Product.find({ tenantId: req.user.tenantId }).populate("category")
     res.json(products)
   } catch (error) {
-    console.error("❌ Get products error:", error)
-    res.status(500).json({ error: error.message })
+    console.error("❌ Error fetching products:", error)
+    res.status(500).json({ error: "Failed to fetch products" })
   }
 })
 
-// Get single product
+// Get a single product by ID
 router.get("/:id", async (req, res) => {
   try {
-    console.log("🔍 Getting product:", req.params.id)
-
-    const { Product } = ensureModelsLoaded(req.tenantDB)
-
-    // Try with populate first, fallback to without
-    let product
-    try {
-      product = await Product.findById(req.params.id).populate("category").populate("offer")
-    } catch (populateError) {
-      console.log("⚠️ Populate failed, loading without populate")
-      product = await Product.findById(req.params.id)
-    }
-
+    const Product = req.tenantModels.Product
+    const product = await Product.findById(req.params.id).populate("category")
     if (!product) {
       return res.status(404).json({ error: "Product not found" })
     }
-
-    console.log("✅ Product found:", product.name)
     res.json(product)
   } catch (error) {
-    console.error("❌ Get product error:", error)
-    res.status(500).json({ error: error.message })
+    console.error("❌ Error fetching product by ID:", error)
+    res.status(500).json({ error: "Failed to fetch product" })
   }
 })
 
 // Create product - FIXED VERSION
-
-
-router.post("/", testUpload.array("images", 10), async (req, res) => {
+router.post("/", uploadSingle.single("image"), async (req, res) => {
   try {
-    const { Product } = ensureModelsLoaded(req.tenantDB);
+    const Product = req.tenantModels.Product
+    const { name, description, price, category, stock, sku, isActive } = req.body
+    let imageUrl = null
 
-    const {
+    if (!name || !price || !category || stock === undefined) {
+      return res.status(400).json({ error: "Missing required product fields" })
+    }
+
+    // Upload image to Cloudinary if provided
+    if (req.file) {
+      const result = await cloudinary.uploader.upload(
+        `data:${req.file.mimetype};base64,${req.file.buffer.toString("base64")}`,
+        {
+          folder: `yesp-studio/tenants/${req.user.tenantId}/products`,
+        },
+      )
+      imageUrl = result.secure_url
+      console.log(`✅ Image uploaded to Cloudinary: ${imageUrl}`)
+    }
+
+    const newProduct = new Product({
+      tenantId: req.user.tenantId,
       name,
-      sku,
-      category,
-      tags,
-      shortDescription,
       description,
       price,
-      originalPrice,
-      taxPercentage,
-      stock,
-      lowStockAlert,
-      allowBackorders,
-      weight,
-      dimensions,
-      shippingClass,
-      metaTitle,
-      metaDescription,
-      offer,
-      hasVariants,
-      variants,
-      existingImages,
-    } = req.body;
-
-    let gallery = [];
-    if (existingImages) {
-      try {
-        const parsed = JSON.parse(existingImages);
-        if (Array.isArray(parsed)) gallery = parsed;
-      } catch (err) {
-        console.warn("Invalid existingImages JSON");
-      }
-    }
-
-    if (req.files && req.files.length > 0) {
-      const uploads = await Promise.all(
-        req.files.map(file => upload(file.buffer, "yesp-products"))
-      );
-      gallery = [...gallery, ...uploads.map(f => f.secure_url)];
-    }
-
-    if (gallery.length === 0) {
-      return res.status(400).json({ error: "At least one product image is required" });
-    }
-
-    const slug = name.toLowerCase().replace(/\s+/g, "-");
-
-    const product = new Product({
-      name,
-      slug,
-      sku,
       category,
-      tags: typeof tags === "string" ? tags.split(",").map(t => t.trim()) : [],
-      shortDescription,
-      description,
-      price: parseFloat(price),
-      originalPrice: originalPrice ? parseFloat(originalPrice) : undefined,
-      taxPercentage: parseFloat(taxPercentage) || 0,
-      stock: parseInt(stock),
-      lowStockAlert: parseInt(lowStockAlert) || 0,
-      allowBackorders: allowBackorders === "true" || allowBackorders === true,
-      thumbnail: gallery[0],
-      gallery,
-      weight: parseFloat(weight) || 0,
-      dimensions: typeof dimensions === "string" ? JSON.parse(dimensions) : {},
-      shippingClass,
-      metaTitle,
-      metaDescription,
-      offer: offer || null,
-      hasVariants: hasVariants === "true" || hasVariants === true,
-      variants: hasVariants === "true" ? (Array.isArray(variants) ? variants : []) : [],
-      isActive: true,
-      isFeatured: false,
-      status: "published",
-    });
-
-    await product.save();
-    res.status(201).json({ success: true, product });
-  } catch (err) {
-    console.error("Error creating product:", err);
-    res.status(500).json({ error: "Failed to create product", details: err.message });
+      imageUrl,
+      stock,
+      sku,
+      isActive: isActive === "true" || isActive === true, // Handle boolean from form-data
+    })
+    await newProduct.save()
+    res.status(201).json(newProduct)
+  } catch (error) {
+    console.error("❌ Error creating product:", error)
+    res.status(500).json({ error: "Failed to create product" })
   }
-});
-
-module.exports = router;
-
+})
 
 // Update product - FIXED VERSION
-router.put("/:id", upload.array("images", 10), async (req, res) => {
+router.put("/:id", uploadSingle.single("image"), async (req, res) => {
   try {
     console.log("📝 Updating product:", req.params.id)
 
-    const { Product } = ensureModelsLoaded(req.tenantDB)
+    const Product = req.tenantModels.Product
+    const { name, description, price, category, stock, sku, isActive } = req.body
+    let imageUrl = req.body.imageUrl // Keep existing image if not new one
 
-    const {
-      name,
-      sku,
-      category,
-      tags,
-      shortDescription,
-      description,
-      price,
-      originalPrice,
-      taxPercentage,
-      stock,
-      lowStockAlert,
-      allowBackorders,
-      weight,
-      dimensions,
-      shippingClass,
-      metaTitle,
-      metaDescription,
-      offer,
-      hasVariants,
-      variants,
-      existingImages,
-    } = req.body
+    // Upload new image to Cloudinary if provided
+    if (req.file) {
+      const result = await cloudinary.uploader.upload(
+        `data:${req.file.mimetype};base64,${req.file.buffer.toString("base64")}`,
+        {
+          folder: `yesp-studio/tenants/${req.user.tenantId}/products`,
+        },
+      )
+      imageUrl = result.secure_url
+      console.log(`✅ New image uploaded to Cloudinary: ${imageUrl}`)
+    }
 
-    const product = await Product.findById(req.params.id)
-    if (!product) {
+    const updatedProduct = await Product.findByIdAndUpdate(
+      req.params.id,
+      {
+        name,
+        description,
+        price,
+        category,
+        imageUrl,
+        stock,
+        sku,
+        isActive: isActive === "true" || isActive === true,
+      },
+      { new: true, runValidators: true },
+    )
+    if (!updatedProduct) {
       return res.status(404).json({ error: "Product not found" })
     }
-
-    // Handle image updates
-    let gallery = []
-    try {
-      gallery = parseExistingImages(existingImages)
-    } catch (e) {
-      console.error("Error parsing existing images:", e)
-      gallery = []
-    }
-
-    // Add new uploaded images
-    if (req.files && req.files.length > 0) {
-      const newImages = req.files.map((file) => file.path)
-      gallery = [...gallery, ...newImages]
-    }
-
-    // Parse and validate price fields
-    const parsedPrice = Number.parseFloat(price)
-    let parsedOriginalPrice = originalPrice ? Number.parseFloat(originalPrice) : undefined
-
-    // Handle originalPrice validation logic
-    if (parsedOriginalPrice && parsedOriginalPrice < parsedPrice) {
-      console.log("⚠️ Original price is less than current price, setting to null for no discount")
-      parsedOriginalPrice = undefined
-    }
-
-    // Parse JSON fields safely
-    let parsedTags = []
-    try {
-      parsedTags = tags ? (typeof tags === "string" ? JSON.parse(tags) : tags) : []
-    } catch (e) {
-      console.error("Error parsing tags:", e)
-      parsedTags = []
-    }
-
-    let parsedDimensions = { length: 0, width: 0, height: 0 }
-    try {
-      parsedDimensions = dimensions
-        ? typeof dimensions === "string"
-          ? JSON.parse(dimensions)
-          : dimensions
-        : { length: 0, width: 0, height: 0 }
-    } catch (e) {
-      console.error("Error parsing dimensions:", e)
-    }
-
-    let parsedVariants = []
-    try {
-      parsedVariants =
-        variants && hasVariants === "true" ? (typeof variants === "string" ? JSON.parse(variants) : variants) : []
-    } catch (e) {
-      console.error("Error parsing variants:", e)
-      parsedVariants = []
-    }
-
-    // Parse offer field properly
-    const parsedOffer = parseOfferField(offer)
-
-    // Generate slug if name changed
-    const slug = name !== product.name ? generateSlug(name) : product.slug
-
-    // Update product fields
-    const updateData = {
-      name,
-      slug,
-      sku: sku.toUpperCase(),
-      category,
-      tags: parsedTags,
-      shortDescription,
-      description,
-      price: parsedPrice,
-      originalPrice: parsedOriginalPrice, // Now properly handled
-      taxPercentage: taxPercentage ? Number.parseFloat(taxPercentage) : 0,
-      stock: Number.parseInt(stock),
-      lowStockAlert: lowStockAlert ? Number.parseInt(lowStockAlert) : 5,
-      allowBackorders: allowBackorders === "true",
-      gallery,
-      thumbnail: gallery.length > 0 ? gallery[0] : product.thumbnail,
-      weight: weight ? Number.parseFloat(weight) : 0,
-      dimensions: parsedDimensions,
-      shippingClass: shippingClass || "default",
-      metaTitle,
-      metaDescription,
-      offer: parsedOffer,
-      hasVariants: hasVariants === "true",
-      variants: parsedVariants,
-    }
-
-    const updatedProduct = await Product.findByIdAndUpdate(req.params.id, updateData, { new: true })
-
-    // Try to populate, but don't fail if it doesn't work
-    try {
-      await updatedProduct.populate("category")
-      await updatedProduct.populate("offer")
-    } catch (populateError) {
-      console.log("⚠️ Populate failed on update:", populateError.message)
-    }
-
-    console.log("✅ Product updated successfully:", updatedProduct._id)
     res.json(updatedProduct)
   } catch (error) {
-    console.error("❌ Update product error:", error)
-
-    if (error.name === "ValidationError") {
-      const errors = Object.keys(error.errors).map((key) => ({
-        field: key,
-        message: error.errors[key].message,
-        value: error.errors[key].value,
-      }))
-      return res.status(400).json({
-        error: "Validation failed",
-        details: errors,
-      })
-    }
-
-    if (error.code === 11000) {
-      return res.status(400).json({
-        error: "Duplicate value",
-        details: "SKU or slug already exists",
-      })
-    }
-
-    res.status(500).json({ error: error.message })
+    console.error("❌ Error updating product:", error)
+    res.status(500).json({ error: "Failed to update product" })
   }
 })
 
 // Delete product
 router.delete("/:id", async (req, res) => {
   try {
-    const { Product } = ensureModelsLoaded(req.tenantDB)
-    const product = await Product.findById(req.params.id)
-
-    if (!product) {
+    const Product = req.tenantModels.Product
+    const deletedProduct = await Product.findByIdAndDelete(req.params.id)
+    if (!deletedProduct) {
       return res.status(404).json({ error: "Product not found" })
     }
-
-    // Delete images from Cloudinary
-    try {
-      for (const imageUrl of product.gallery) {
-        if (imageUrl.includes("cloudinary.com")) {
-          const publicId = getPublicIdFromUrl(imageUrl)
-          if (publicId) {
-            await deleteImage(`yesp-products/${publicId}`)
-          }
-        }
-      }
-    } catch (imageError) {
-      console.error("Error deleting images:", imageError)
-      // Continue with product deletion even if image deletion fails
-    }
-
-    await Product.findByIdAndDelete(req.params.id)
-    console.log("✅ Product deleted successfully:", req.params.id)
+    // Optionally delete image from Cloudinary here if imageUrl is stored
     res.json({ message: "Product deleted successfully" })
   } catch (error) {
-    console.error("❌ Delete product error:", error)
-    res.status(500).json({ error: error.message })
+    console.error("❌ Error deleting product:", error)
+    res.status(500).json({ error: "Failed to delete product" })
   }
 })
 

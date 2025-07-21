@@ -1,7 +1,6 @@
 const mongoose = require("mongoose")
 const bcrypt = require("bcryptjs")
 
-// This is now just for authentication lookup - minimal data
 const userSchema = new mongoose.Schema(
   {
     email: {
@@ -44,4 +43,11 @@ userSchema.methods.comparePassword = async function (password) {
   return bcrypt.compare(password, this.password)
 }
 
-module.exports = mongoose.model("User", userSchema)
+// Export a function that takes a connection instance
+module.exports = (connection) => {
+  // Check if the model is already defined on this connection
+  if (connection.models && connection.models.User) {
+    return connection.models.User
+  }
+  return connection.model("User", userSchema)
+}

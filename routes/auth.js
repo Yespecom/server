@@ -18,6 +18,7 @@ router.use((req, res, next) => {
     "content-type": req.get("content-type"),
     "user-agent": req.get("user-agent"),
   })
+
   // Log request body for POST requests
   if (req.method === "POST" && req.body) {
     console.log(`📦 Request Body:`, {
@@ -25,6 +26,7 @@ router.use((req, res, next) => {
       password: req.body.password ? "[HIDDEN]" : undefined,
     })
   }
+
   next()
 })
 
@@ -91,9 +93,7 @@ router.post("/register/initiate", async (req, res) => {
     const existingPending = await PendingRegistration.findOne({ email })
     if (existingPending) {
       // If a pending registration exists and is not expired, resend OTP
-      // NOTE: Your PendingRegistration model needs an 'expiresAt' field for this logic to work.
-      // If it's using 'createdAt' with 'expires' index, you might need to adjust this check.
-      if (existingPending.expiresAt && existingPending.expiresAt > new Date()) {
+      if (existingPending.expiresAt > new Date()) {
         const otp = await OTP.createOTP(email, "registration")
         await sendOTPEmail(email, otp, "registration")
         console.log(`🔄 Resent OTP for existing pending registration: ${email}`)
@@ -203,19 +203,13 @@ router.post("/register/complete", async (req, res) => {
       console.log(`👤 Tenant user created: ${email}`)
 
       // Create user in main DB for authentication lookup
-      try {
-        const mainUser = new User({
-          email,
-          password: hashedPassword, // Use the already hashed password
-          tenantId,
-        })
-        await mainUser.save()
-        console.log(`🔑 Main user created for auth: ${email}`)
-      } catch (mainUserSaveError) {
-        console.error(`❌ Error saving main user for ${email}:`, mainUserSaveError)
-        // Re-throw the error to be caught by the outer dbError handler
-        throw new Error(`Failed to save main user: ${mainUserSaveError.message}`)
-      }
+      const mainUser = new User({
+        email,
+        password: hashedPassword, // Use the already hashed password
+        tenantId,
+      })
+      await mainUser.save()
+      console.log(`🔑 Main user created for auth: ${email}`)
 
       // Create default settings
       const defaultSettings = new Settings({
@@ -227,9 +221,19 @@ router.post("/register/complete", async (req, res) => {
           supportEmail: email,
           supportPhone: phone,
         },
-        payment: { codEnabled: true },
-        social: { instagram: "", whatsapp: phone, facebook: "" },
-        shipping: { deliveryTime: "2-3 business days", charges: 50, freeShippingAbove: 500 },
+        payment: {
+          codEnabled: true,
+        },
+        social: {
+          instagram: "",
+          whatsapp: phone,
+          facebook: "",
+        },
+        shipping: {
+          deliveryTime: "2-3 business days",
+          charges: 50,
+          freeShippingAbove: 500,
+        },
       })
       await defaultSettings.save()
       console.log(`⚙️ Default settings created for tenant: ${tenantId}`)
@@ -257,10 +261,15 @@ router.post("/register/complete", async (req, res) => {
 
       // Generate JWT with tenant info
       const token = jwt.sign(
-        { userId: tenantUser._id, tenantId: tenantId, email: email },
+        {
+          userId: tenantUser._id,
+          tenantId: tenantId,
+          email: email,
+        },
         process.env.JWT_SECRET || "your-secret-key",
         { expiresIn: "7d" },
       )
+
       res.status(201).json({
         message: "User registered successfully",
         token,
@@ -268,9 +277,8 @@ router.post("/register/complete", async (req, res) => {
         status: "no_store",
       })
     } catch (dbError) {
-      console.error(`❌ Tenant setup or main user save error for ${tenantId}:`, dbError)
-      // Modify the error message sent to the client for clarity
-      res.status(500).json({ error: `Failed to complete registration: ${dbError.message}` })
+      console.error(`❌ Tenant setup error for ${tenantId}:`, dbError)
+      throw new Error(`Failed to setup tenant: ${dbError.message}`)
     }
   } catch (error) {
     console.error("❌ Complete registration error:", error)
@@ -282,6 +290,7 @@ router.post("/register/complete", async (req, res) => {
 router.post("/login", async (req, res) => {
   try {
     console.log("🔐 Login attempt started")
+
     const { email, password } = req.body
 
     // Validate input
@@ -291,6 +300,7 @@ router.post("/login", async (req, res) => {
     }
 
     console.log(`🔍 Looking for user: ${email}`)
+
     // Find user in main DB for auth
     const mainUser = await User.findOne({ email: email.toLowerCase().trim() })
     if (!mainUser) {
@@ -303,8 +313,10 @@ router.post("/login", async (req, res) => {
     // Use direct bcrypt comparison for reliability
     try {
       console.log(`🔍 Comparing password for user: ${email}`)
+
       const isMatch = await bcrypt.compare(password, mainUser.password)
       console.log(`🔑 Password comparison result: ${isMatch}`)
+
       if (!isMatch) {
         console.log(`❌ Password mismatch for user: ${email}`)
         return res.status(400).json({ error: "Invalid credentials" })
@@ -313,18 +325,22 @@ router.post("/login", async (req, res) => {
       console.error(`❌ Password comparison error:`, passwordError)
       return res.status(500).json({ error: "Authentication error" })
     }
+
     console.log(`✅ Password verified for user: ${email}`)
 
     // Get tenant DB and user data
     try {
       const tenantDB = await getTenantDB(mainUser.tenantId)
       console.log(`✅ Connected to tenant DB: ${mainUser.tenantId}`)
+
       const TenantUser = require("../models/tenant/User")(tenantDB)
       const tenantUser = await TenantUser.findOne({ email: email.toLowerCase().trim() })
+
       if (!tenantUser) {
         console.log(`❌ Tenant user not found: ${email}`)
         return res.status(400).json({ error: "User data not found" })
       }
+
       console.log(`✅ Found tenant user: ${email}`)
 
       // Generate JWT
@@ -337,6 +353,7 @@ router.post("/login", async (req, res) => {
         process.env.JWT_SECRET || "your-secret-key",
         { expiresIn: "7d" },
       )
+
       console.log(`✅ JWT generated for user: ${email}`)
 
       // Prepare response
@@ -352,7 +369,9 @@ router.post("/login", async (req, res) => {
           role: tenantUser.role,
         },
       }
+
       console.log(`✅ Login successful for: ${email}`)
+
       res.json(response)
     } catch (tenantError) {
       console.error(`❌ Tenant DB error for ${mainUser.tenantId}:`, tenantError)
@@ -385,6 +404,7 @@ router.post("/login-otp", async (req, res) => {
     const tenantDB = await getTenantDB(mainUser.tenantId)
     const TenantUser = require("../models/tenant/User")(tenantDB)
     const tenantUser = await TenantUser.findOne({ email })
+
     if (!tenantUser) {
       return res.status(400).json({ error: "User data not found" })
     }
@@ -399,6 +419,7 @@ router.post("/login-otp", async (req, res) => {
       process.env.JWT_SECRET || "your-secret-key",
       { expiresIn: "7d" },
     )
+
     res.json({
       token,
       tenantId: mainUser.tenantId,
@@ -437,6 +458,7 @@ router.post("/setup-store", async (req, res) => {
     const tenantDB = await getTenantDB(mainUser.tenantId)
     const TenantUser = require("../models/tenant/User")(tenantDB)
     const tenantUser = await TenantUser.findById(decoded.userId)
+
     if (!tenantUser) {
       return res.status(404).json({ error: "Tenant user not found" })
     }
@@ -481,6 +503,7 @@ router.post("/setup-store", async (req, res) => {
 
     // Dynamically construct the base URL from the request
     const baseUrl = `${req.protocol}://${req.get("host")}`
+
     res.json({
       message: "Store setup completed successfully",
       tenantId: mainUser.tenantId,
@@ -503,6 +526,7 @@ router.get("/user/status", async (req, res) => {
     }
 
     console.log("🔍 Getting user status...")
+
     const decoded = jwt.verify(token, process.env.JWT_SECRET || "your-secret-key")
     console.log("✅ Token decoded:", { email: decoded.email, tenantId: decoded.tenantId })
 
@@ -512,16 +536,19 @@ router.get("/user/status", async (req, res) => {
       console.log("❌ Main user not found")
       return res.status(404).json({ error: "User not found" })
     }
+
     console.log("✅ Main user found:", { tenantId: mainUser.tenantId, storeId: mainUser.storeId })
 
     // Get tenant user data
     const tenantDB = await getTenantDB(mainUser.tenantId)
     const TenantUser = require("../models/tenant/User")(tenantDB)
     const tenantUser = await TenantUser.findById(decoded.userId).select("-password")
+
     if (!tenantUser) {
       console.log("❌ Tenant user not found")
       return res.status(404).json({ error: "Tenant user not found" })
     }
+
     console.log("✅ Tenant user found:", { hasStore: tenantUser.hasStore })
 
     res.json({

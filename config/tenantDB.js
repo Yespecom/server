@@ -22,6 +22,7 @@ const getTenantDB = async (tenantId) => {
       maxPoolSize: 10,
       serverSelectionTimeoutMS: 15000,
       socketTimeoutMS: 60000,
+      family: 4,
     })
 
     // Handle connection events

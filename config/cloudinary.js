@@ -1,96 +1,108 @@
+// Make sure the Cloudinary configuration is properly set up:
+
 const cloudinary = require("cloudinary").v2
 const { CloudinaryStorage } = require("multer-storage-cloudinary")
-const multer = require("multer")
 
-// Validate Cloudinary configuration
-const validateCloudinaryConfig = () => {
-  const requiredVars = ["CLOUDINARY_CLOUD_NAME", "CLOUDINARY_API_KEY", "CLOUDINARY_API_SECRET"]
-  const missing = requiredVars.filter((varName) => !process.env[varName])
-
-  if (missing.length > 0) {
-    console.error(`❌ Missing Cloudinary environment variables: ${missing.join(", ")}`)
-    console.error("Please add these to your .env file:")
-    missing.forEach((varName) => {
-      console.error(`${varName}=your_${varName.toLowerCase()}`)
-    })
-    return false
-  }
-
-  return true
-}
-
-// Only configure Cloudinary if all required variables are present
-if (validateCloudinaryConfig()) {
-  // Configure Cloudinary
-  cloudinary.config({
-    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-    api_key: process.env.CLOUDINARY_API_KEY,
-    api_secret: process.env.CLOUDINARY_API_SECRET,
-  })
-
-  console.log("✅ Cloudinary configured successfully")
-} else {
-  console.error("❌ Cloudinary configuration failed")
-}
-
-// Configure Cloudinary storage for multer
-const storage = new CloudinaryStorage({
-  cloudinary: cloudinary,
-  params: {
-    folder: "yesp-products", // Folder name in Cloudinary
-    allowed_formats: ["jpg", "jpeg", "png", "webp"],
-    transformation: [
-      { width: 1000, height: 1000, crop: "limit", quality: "auto" }, // Optimize images
-    ],
-  },
+// Configure Cloudinary
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
 })
 
-const upload = multer({
-  storage: storage,
-  limits: {
-    fileSize: 5 * 1024 * 1024, // 5MB limit
-  },
-  fileFilter: (req, file, cb) => {
-    if (file.mimetype.startsWith("image/")) {
-      cb(null, true)
-    } else {
-      cb(new Error("Only image files are allowed!"), false)
-    }
-  },
+console.log("🔧 Cloudinary configuration loaded:", {
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME ? "✅ Set" : "❌ Missing",
+  api_key: process.env.CLOUDINARY_API_KEY ? "✅ Set" : "❌ Missing",
+  api_secret: process.env.CLOUDINARY_API_SECRET ? "✅ Set" : "❌ Missing",
 })
 
-// Helper function to delete image from Cloudinary
-const deleteImage = async (publicId) => {
+// Upload function with better error handling
+const upload = async (buffer, folder = "uploads") => {
   try {
-    if (!validateCloudinaryConfig()) {
-      throw new Error("Cloudinary not configured")
-    }
+    console.log("📸 Starting Cloudinary upload to folder:", folder)
+    console.log("📸 Buffer size:", buffer.length, "bytes")
 
-    const result = await cloudinary.uploader.destroy(publicId)
-    console.log("🗑️ Image deleted from Cloudinary:", result)
-    return result
+    return new Promise((resolve, reject) => {
+      const uploadStream = cloudinary.uploader.upload_stream(
+        {
+          folder: folder,
+          resource_type: "image",
+          quality: "auto",
+          fetch_format: "auto",
+          transformation: [
+            { width: 1200, height: 1200, crop: "limit" }, // Limit max size
+            { quality: "auto:good" }, // Optimize quality
+          ],
+        },
+        (error, result) => {
+          if (error) {
+            console.error("❌ Cloudinary upload error:", error)
+            reject(error)
+          } else {
+            console.log("✅ Cloudinary upload success:", result.public_id)
+            resolve(result)
+          }
+        },
+      )
+
+      uploadStream.end(buffer)
+    })
   } catch (error) {
-    console.error("Error deleting image from Cloudinary:", error)
+    console.error("❌ Upload function error:", error)
     throw error
   }
 }
 
-// Helper function to extract public ID from Cloudinary URL
+// Delete function with better error handling
+const deleteImage = async (publicId) => {
+  try {
+    console.log("🗑️ Deleting image from Cloudinary:", publicId)
+
+    const result = await cloudinary.uploader.destroy(publicId)
+    console.log("✅ Cloudinary delete result:", result)
+
+    return result
+  } catch (error) {
+    console.error("❌ Cloudinary delete error:", error)
+    throw error
+  }
+}
+
+// Helper function to extract public ID from URL
 const getPublicIdFromUrl = (url) => {
   try {
+    if (!url || !url.includes("cloudinary.com")) {
+      return null
+    }
+
+    // Extract public ID from Cloudinary URL
     const parts = url.split("/")
-    const filename = parts[parts.length - 1]
-    return filename.split(".")[0]
+    const uploadIndex = parts.findIndex((part) => part === "upload")
+
+    if (uploadIndex === -1) return null
+
+    // Get everything after version (if exists) or after upload
+    let publicIdParts = parts.slice(uploadIndex + 1)
+
+    // Remove version if it exists (starts with 'v' followed by numbers)
+    if (publicIdParts[0] && /^v\d+$/.test(publicIdParts[0])) {
+      publicIdParts = publicIdParts.slice(1)
+    }
+
+    // Join the remaining parts and remove file extension
+    const publicId = publicIdParts.join("/").replace(/\.[^/.]+$/, "")
+    console.log("🔍 Extracted public ID:", publicId, "from URL:", url)
+
+    return publicId
   } catch (error) {
-    console.error("Error extracting public ID from URL:", error)
+    console.error("❌ Error extracting public ID:", error)
     return null
   }
 }
 
 module.exports = {
-  cloudinary,
   upload,
   deleteImage,
   getPublicIdFromUrl,
-  validateCloudinaryConfig,
+  cloudinary,
 }

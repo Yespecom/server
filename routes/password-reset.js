@@ -1,95 +1,192 @@
 const express = require("express")
+const User = require("../models/User")
+const OTP = require("../models/OTP")
+const { sendOTPEmail } = require("../config/email")
+const { getTenantDB } = require("../config/tenantDB")
+const AuthUtils = require("../utils/auth")
 const router = express.Router()
-const bcrypt = require("bcryptjs")
-const jwt = require("jsonwebtoken")
-const { sendEmail } = require("../config/email")
-const { generateOTP } = require("../lib/utils") // Assuming you have a utility to generate OTP
-const { getMainDb } = require("../db/connection")
-const User = require("../models/User")(getMainDb()) // Main User model
-const OTP = require("../models/OTP") // Re-using OTP model for password reset
 
-// Request password reset (send OTP)
+// Apply rate limiting
+router.use(AuthUtils.passwordResetRateLimit)
+
+// Request password reset
 router.post("/request", async (req, res) => {
-  const { email } = req.body
-
-  if (!email) {
-    return res.status(400).json({ error: "Email is required." })
-  }
-
   try {
-    const user = await User.findOne({ email: email.toLowerCase() })
+    const { email } = req.body
+
+    console.log(`🔐 Password reset request for: ${email}`)
+
+    if (!email || !AuthUtils.validateEmail(email)) {
+      return res.status(400).json({
+        error: "Valid email address is required",
+        code: "INVALID_EMAIL",
+      })
+    }
+
+    // Check if user exists
+    const user = await User.findOne({ email: email.toLowerCase(), isActive: true })
+
+    // Always return success for security (don't reveal if email exists)
+    const successResponse = {
+      message: "If an account with this email exists, a password reset code has been sent.",
+      email,
+    }
+
     if (!user) {
-      // For security, always return a generic message even if user not found
-      return res
-        .status(200)
-        .json({ message: "If an account with that email exists, a password reset OTP has been sent." })
+      console.log(`❌ User not found for password reset: ${email}`)
+      return res.json(successResponse)
     }
 
-    const otp = generateOTP() // Generate a 6-digit OTP
+    // Generate and send OTP
+    const otp = await OTP.createOTP(email, "password_reset", AuthUtils.extractClientInfo(req))
+    await sendOTPEmail(email, otp, "password reset")
 
-    // Delete any existing OTPs for this email to ensure only one is active
-    await OTP.deleteMany({ email: email.toLowerCase() })
+    console.log(`🔐 Password reset OTP sent for ${email}`)
 
-    const newOTP = new OTP({ email: email.toLowerCase(), otp })
-    await newOTP.save()
-
-    const appName = process.env.APP_NAME || "Your App"
-    const resetLink = `${process.env.FRONTEND_URL}/reset-password?email=${encodeURIComponent(email)}&otp=${otp}` // Example frontend link
-
-    const sendResult = await sendEmail({
-      to: email,
-      subject: `${otp} is your ${appName} password reset code`,
-      html: `<p>Your password reset code for ${appName} is: <strong>${otp}</strong>. It is valid for 5 minutes.</p>
-             <p>Alternatively, you can click this link to reset your password: <a href="${resetLink}">${resetLink}</a></p>
-             <p>If you did not request a password reset, please ignore this email.</p>`,
-    })
-
-    if (!sendResult.success) {
-      console.error("❌ Failed to send password reset email:", sendResult.error)
-      return res.status(500).json({ error: "Failed to send password reset email." })
-    }
-
-    console.log(`✅ Password reset OTP sent to ${email}`)
-    res.status(200).json({ message: "If an account with that email exists, a password reset OTP has been sent." })
+    res.json(successResponse)
   } catch (error) {
-    console.error("❌ Error requesting password reset:", error)
-    res.status(500).json({ error: "Internal server error while requesting password reset." })
+    console.error("❌ Password reset request error:", error)
+    res.status(500).json({
+      error: "Password reset request failed",
+      details: error.message,
+      code: "PASSWORD_RESET_REQUEST_ERROR",
+    })
   }
 })
 
-// Verify OTP and reset password
-router.post("/reset", async (req, res) => {
-  const { email, otp, newPassword } = req.body
-
-  if (!email || !otp || !newPassword) {
-    return res.status(400).json({ error: "Email, OTP, and new password are required." })
-  }
-
+// Verify reset OTP
+router.post("/verify-otp", async (req, res) => {
   try {
-    const foundOTP = await OTP.findOne({ email: email.toLowerCase(), otp })
+    const { email, otp } = req.body
 
-    if (!foundOTP) {
-      return res.status(400).json({ error: "Invalid or expired OTP." })
+    console.log(`🔍 Verifying reset OTP for: ${email}`)
+
+    if (!email || !otp) {
+      return res.status(400).json({
+        error: "Email and OTP are required",
+        code: "MISSING_FIELDS",
+      })
     }
 
-    const user = await User.findOne({ email: email.toLowerCase() })
+    // Check OTP without consuming it
+    const otpCheck = await OTP.checkOTP(email, otp, "password_reset")
+
+    if (!otpCheck.success) {
+      return res.status(400).json({
+        error: otpCheck.message,
+        code: otpCheck.code,
+      })
+    }
+
+    // Check if user still exists
+    const user = await User.findOne({ email: email.toLowerCase(), isActive: true })
     if (!user) {
-      return res.status(404).json({ error: "User not found." })
+      return res.status(404).json({
+        error: "User not found",
+        code: "USER_NOT_FOUND",
+      })
     }
 
-    // Hash the new password
-    const salt = await bcrypt.genSalt(10)
-    user.password = await bcrypt.hash(newPassword, salt)
-    await user.save()
+    console.log(`✅ Password reset OTP verified for ${email}`)
 
-    // Delete the OTP after successful reset
-    await OTP.deleteOne({ _id: foundOTP._id })
-
-    console.log(`✅ Password successfully reset for ${email}`)
-    res.status(200).json({ message: "Password reset successfully." })
+    res.json({
+      message: "OTP verified successfully. You can now reset your password.",
+      verified: true,
+      email,
+    })
   } catch (error) {
-    console.error("❌ Error resetting password:", error)
-    res.status(500).json({ error: "Internal server error while resetting password." })
+    console.error("❌ Verify reset OTP error:", error)
+    res.status(500).json({
+      error: "OTP verification failed",
+      details: error.message,
+      code: "OTP_VERIFICATION_ERROR",
+    })
+  }
+})
+
+// Reset password
+router.post("/reset", async (req, res) => {
+  try {
+    const { email, otp, newPassword } = req.body
+
+    console.log(`🔐 Password reset attempt for: ${email}`)
+
+    if (!email || !otp || !newPassword) {
+      return res.status(400).json({
+        error: "Email, OTP, and new password are required",
+        code: "MISSING_FIELDS",
+      })
+    }
+
+    // Validate new password
+    const passwordValidation = AuthUtils.validatePassword(newPassword)
+    if (!passwordValidation.isValid) {
+      return res.status(400).json({
+        error: "Password validation failed",
+        details: passwordValidation.errors,
+        code: "INVALID_PASSWORD",
+      })
+    }
+
+    // Verify and consume OTP
+    const otpVerification = await OTP.verifyOTP(email, otp, "password_reset")
+    if (!otpVerification.success) {
+      return res.status(400).json({
+        error: otpVerification.message,
+        code: otpVerification.code,
+      })
+    }
+
+    // Find user in main DB
+    const mainUser = await User.findOne({ email: email.toLowerCase(), isActive: true })
+    if (!mainUser) {
+      console.log(`❌ User not found in main DB: ${email}`)
+      return res.status(404).json({
+        error: "User not found",
+        code: "USER_NOT_FOUND",
+      })
+    }
+
+    console.log(`👤 Found user in main DB: ${email}, tenantId: ${mainUser.tenantId}`)
+
+    // Update password in main DB
+    mainUser.password = newPassword // Will be hashed by pre-save middleware
+    mainUser.passwordChangedAt = new Date()
+    await mainUser.save()
+    console.log(`✅ Password updated in main DB for ${email}`)
+
+    // Update password in tenant DB as well
+    try {
+      const tenantDB = await getTenantDB(mainUser.tenantId)
+      const TenantUser = require("../models/tenant/User")(tenantDB)
+      const tenantUser = await TenantUser.findOne({ email: email.toLowerCase() })
+
+      if (tenantUser) {
+        tenantUser.password = newPassword // Will be hashed by pre-save middleware
+        tenantUser.passwordChangedAt = new Date()
+        await tenantUser.save()
+        console.log(`✅ Password updated in tenant DB for ${email}`)
+      } else {
+        console.log(`⚠️ Tenant user not found for ${email}`)
+      }
+    } catch (tenantError) {
+      console.error("❌ Error updating tenant password:", tenantError)
+      // Don't fail the request if tenant update fails
+    }
+
+    console.log(`✅ Password reset completed for ${email}`)
+
+    res.json({
+      message: "Password reset successfully. You can now login with your new password.",
+      success: true,
+    })
+  } catch (error) {
+    console.error("❌ Reset password error:", error)
+    res.status(500).json({
+      error: "Password reset failed",
+      details: error.message,
+      code: "PASSWORD_RESET_FAILED",
+    })
   }
 })
 

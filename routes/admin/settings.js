@@ -1,7 +1,5 @@
 const express = require("express")
 const router = express.Router()
-const { getTenantDB } = require("../../config/tenantDB")
-const Settings = require("../../models/tenant/Settings") // Settings model factory
 
 // Add logging middleware for settings routes
 router.use((req, res, next) => {
@@ -9,14 +7,6 @@ router.use((req, res, next) => {
   console.log(`⚙️ Full URL: ${req.originalUrl}`)
   console.log(`⚙️ Has tenantDB: ${!!req.tenantDB}`)
   console.log(`⚙️ Tenant ID: ${req.tenantId}`)
-  next()
-})
-
-// Middleware to ensure tenantDB is available
-router.use((req, res, next) => {
-  if (!req.tenantDB) {
-    return res.status(500).json({ error: "Tenant database connection not established." })
-  }
   next()
 })
 
@@ -32,7 +22,8 @@ const ensureSettingsModel = (req, res, next) => {
     }
 
     // Initialize Settings model
-    req.SettingsModel = Settings(req.tenantDB)
+    const Settings = require("../../models/tenant/Settings")(req.tenantDB)
+    req.SettingsModel = Settings
 
     console.log("✅ Settings model initialized successfully")
     next()
@@ -74,11 +65,11 @@ router.post("/payment", handlePaymentUpdate)
 
 async function handlePaymentUpdate(req, res) {
   try {
-    const SettingsModel = req.SettingsModel
+    const Settings = req.SettingsModel
 
-    let settings = await SettingsModel.findOne()
+    let settings = await Settings.findOne()
     if (!settings) {
-      settings = new SettingsModel({})
+      settings = new Settings({})
     }
 
     // Merge payment settings
@@ -123,13 +114,9 @@ async function handlePaymentUpdate(req, res) {
 router.get("/", async (req, res) => {
   try {
     console.log("📋 Getting all settings...")
-    const SettingsModel = req.SettingsModel
-    const settings = await SettingsModel.findOne({})
+    const Settings = req.SettingsModel
+    const settings = await Settings.findOne()
     console.log("✅ All settings retrieved")
-
-    if (!settings) {
-      return res.status(404).json({ error: "Settings not found for this tenant. Please create them." })
-    }
 
     // Return safe version without sensitive data
     const safeSettings = {
@@ -155,61 +142,13 @@ router.get("/", async (req, res) => {
   }
 })
 
-// Update tenant settings (upsert)
-router.put("/", async (req, res) => {
-  try {
-    const SettingsModel = req.SettingsModel
-    const tenantId = req.tenantId
-    const {
-      storeName,
-      contactEmail,
-      contactPhone,
-      address,
-      currency,
-      logoUrl,
-      socialLinks,
-      shippingPolicy,
-      returnPolicy,
-    } = req.body
-
-    if (!storeName) {
-      return res.status(400).json({ error: "Store name is required for settings" })
-    }
-
-    const updatedSettings = await SettingsModel.findOneAndUpdate(
-      { tenantId },
-      {
-        storeName,
-        contactEmail,
-        contactPhone,
-        address,
-        currency,
-        logoUrl,
-        socialLinks,
-        shippingPolicy,
-        returnPolicy,
-      },
-      { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true },
-    )
-    res.json(updatedSettings)
-  } catch (error) {
-    console.error("❌ Error updating tenant settings:", error)
-    res.status(500).json({ error: "Failed to update settings" })
-  }
-})
-
 // Get general settings
 router.get("/general", async (req, res) => {
   try {
     console.log("📋 Getting general settings...")
-    const SettingsModel = req.SettingsModel
-    const settings = await SettingsModel.findOne({ tenantId: req.tenantId })
+    const Settings = req.SettingsModel
+    const settings = await Settings.findOne()
     console.log("✅ General settings retrieved")
-
-    if (!settings) {
-      return res.status(404).json({ error: "Settings not found for this tenant. Please create them." })
-    }
-
     res.json(settings?.general || {})
     return
   } catch (error) {
@@ -229,11 +168,11 @@ router.post("/general", handleGeneralUpdate)
 async function handleGeneralUpdate(req, res) {
   try {
     console.log("📝 Updating general settings...")
-    const SettingsModel = req.SettingsModel
+    const Settings = req.SettingsModel
 
-    let settings = await SettingsModel.findOne({ tenantId: req.tenantId })
+    let settings = await Settings.findOne()
     if (!settings) {
-      settings = new SettingsModel({ tenantId: req.tenantId })
+      settings = new Settings({})
     }
 
     settings.general = { ...settings.general, ...req.body }
@@ -256,8 +195,8 @@ async function handleGeneralUpdate(req, res) {
 router.get("/payment", async (req, res) => {
   try {
     console.log("💳 Getting payment settings...")
-    const SettingsModel = req.SettingsModel
-    const settings = await SettingsModel.findOne({ tenantId: req.tenantId })
+    const Settings = req.SettingsModel
+    const settings = await Settings.findOne()
 
     // Don't expose sensitive data like API secrets
     const paymentSettings = settings?.payment || {}
@@ -284,14 +223,9 @@ router.get("/payment", async (req, res) => {
 router.get("/social", async (req, res) => {
   try {
     console.log("📱 Getting social settings...")
-    const SettingsModel = req.SettingsModel
-    const settings = await SettingsModel.findOne({ tenantId: req.tenantId })
+    const Settings = req.SettingsModel
+    const settings = await Settings.findOne()
     console.log("✅ Social settings retrieved")
-
-    if (!settings) {
-      return res.status(404).json({ error: "Settings not found for this tenant. Please create them." })
-    }
-
     res.json(settings?.social || {})
     return
   } catch (error) {
@@ -311,11 +245,11 @@ router.post("/social", handleSocialUpdate)
 async function handleSocialUpdate(req, res) {
   try {
     console.log("📱 Updating social settings...")
-    const SettingsModel = req.SettingsModel
+    const Settings = req.SettingsModel
 
-    let settings = await SettingsModel.findOne({ tenantId: req.tenantId })
+    let settings = await Settings.findOne()
     if (!settings) {
-      settings = new SettingsModel({ tenantId: req.tenantId })
+      settings = new Settings({})
     }
 
     settings.social = { ...settings.social, ...req.body }
@@ -338,14 +272,9 @@ async function handleSocialUpdate(req, res) {
 router.get("/shipping", async (req, res) => {
   try {
     console.log("🚚 Getting shipping settings...")
-    const SettingsModel = req.SettingsModel
-    const settings = await SettingsModel.findOne({ tenantId: req.tenantId })
+    const Settings = req.SettingsModel
+    const settings = await Settings.findOne()
     console.log("✅ Shipping settings retrieved")
-
-    if (!settings) {
-      return res.status(404).json({ error: "Settings not found for this tenant. Please create them." })
-    }
-
     res.json(settings?.shipping || {})
     return
   } catch (error) {
@@ -365,11 +294,11 @@ router.post("/shipping", handleShippingUpdate)
 async function handleShippingUpdate(req, res) {
   try {
     console.log("🚚 Updating shipping settings...")
-    const SettingsModel = req.SettingsModel
+    const Settings = req.SettingsModel
 
-    let settings = await SettingsModel.findOne({ tenantId: req.tenantId })
+    let settings = await Settings.findOne()
     if (!settings) {
-      settings = new SettingsModel({ tenantId: req.tenantId })
+      settings = new Settings({})
     }
 
     settings.shipping = { ...settings.shipping, ...req.body }
@@ -397,7 +326,6 @@ router.get("/debug", (req, res) => {
       "GET /api/admin/settings/test",
       "GET /api/admin/settings/debug",
       "GET /api/admin/settings/",
-      "PUT /api/admin/settings/",
       "GET /api/admin/settings/general",
       "PUT /api/admin/settings/general",
       "POST /api/admin/settings/general",

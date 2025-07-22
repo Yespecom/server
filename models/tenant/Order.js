@@ -1,14 +1,31 @@
-const mongoose = require("mongoose")
-
 module.exports = (tenantDB) => {
+  const mongoose = require("mongoose")
+
   const orderSchema = new mongoose.Schema(
     {
+      orderNumber: {
+        type: String,
+        required: true,
+        unique: true,
+      },
       customerId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: "Customer",
         required: true,
       },
-      products: [
+      customerInfo: {
+        name: String,
+        email: String,
+        phone: String,
+        address: {
+          street: String,
+          city: String,
+          state: String,
+          zipCode: String,
+          country: String,
+        },
+      },
+      items: [
         {
           productId: {
             type: mongoose.Schema.Types.ObjectId,
@@ -17,38 +34,70 @@ module.exports = (tenantDB) => {
           },
           name: String,
           price: Number,
-          quantity: {
-            type: Number,
-            required: true,
-            min: 1,
-          },
+          quantity: Number,
+          total: Number,
         },
       ],
-      totalAmount: {
+      subtotal: {
+        type: Number,
+        required: true,
+      },
+      tax: {
+        type: Number,
+        default: 0,
+      },
+      shipping: {
+        type: Number,
+        default: 0,
+      },
+      discount: {
+        type: Number,
+        default: 0,
+      },
+      total: {
         type: Number,
         required: true,
       },
       status: {
         type: String,
-        enum: ["pending", "processing", "shipped", "delivered", "cancelled"],
+        enum: ["pending", "confirmed", "processing", "shipped", "delivered", "cancelled"],
         default: "pending",
       },
-      shippingAddress: {
-        street: String,
-        city: String,
-        state: String,
-        zip: String,
-        country: String,
+      paymentStatus: {
+        type: String,
+        enum: ["pending", "paid", "failed", "refunded"],
+        default: "pending",
       },
-      paymentInfo: {
-        method: String,
-        transactionId: String,
-        status: String,
+      paymentMethod: {
+        type: String,
+        enum: ["cod", "online", "card", "wallet"],
+        default: "cod",
       },
       notes: String,
+      trackingNumber: String,
+      estimatedDelivery: Date,
+      deliveredAt: Date,
     },
-    { timestamps: true },
+    {
+      timestamps: true,
+    },
   )
 
-  return tenantDB.model("Order", orderSchema)
+  // Indexes
+  orderSchema.index({ orderNumber: 1 })
+  orderSchema.index({ customerId: 1 })
+  orderSchema.index({ status: 1 })
+  orderSchema.index({ paymentStatus: 1 })
+  orderSchema.index({ createdAt: -1 })
+
+  // Generate order number
+  orderSchema.pre("save", async function (next) {
+    if (!this.orderNumber) {
+      const count = await this.constructor.countDocuments()
+      this.orderNumber = `ORD-${Date.now()}-${(count + 1).toString().padStart(4, "0")}`
+    }
+    next()
+  })
+
+  return tenantDB.models.Order || tenantDB.model("Order", orderSchema)
 }

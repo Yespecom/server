@@ -1,9 +1,5 @@
 const express = require("express")
 const router = express.Router()
-const { getTenantDB } = require("../../config/tenantDB")
-const Payment = require("../../models/tenant/Payment") // Payment model factory
-const Order = require("../../models/tenant/Order") // Order model factory
-const Customer = require("../../models/tenant/Customer") // Customer model factory
 
 // Add logging middleware for payments routes
 router.use((req, res, next) => {
@@ -14,13 +10,34 @@ router.use((req, res, next) => {
   next()
 })
 
-// Middleware to ensure tenantDB is available
-router.use((req, res, next) => {
-  if (!req.tenantDB) {
-    return res.status(500).json({ error: "Tenant database connection not established." })
+// Middleware to ensure Payment model is available
+const ensurePaymentModel = (req, res, next) => {
+  try {
+    if (!req.tenantDB) {
+      console.error("❌ No tenant database connection available")
+      return res.status(500).json({
+        error: "Database connection not available",
+        details: "Tenant database connection is missing",
+      })
+    }
+
+    // Initialize Payment model
+    const Payment = require("../../models/tenant/Payment")(req.tenantDB)
+    req.PaymentModel = Payment
+
+    console.log("✅ Payment model initialized successfully")
+    next()
+  } catch (error) {
+    console.error("❌ Error initializing Payment model:", error)
+    res.status(500).json({
+      error: "Failed to initialize payment model",
+      details: error.message,
+    })
   }
-  next()
-})
+}
+
+// Apply the model middleware to all routes
+router.use(ensurePaymentModel)
 
 // Test endpoint to verify payments route is working
 router.get("/test", (req, res) => {
@@ -30,6 +47,7 @@ router.get("/test", (req, res) => {
     path: req.path,
     originalUrl: req.originalUrl,
     hasTenantDB: !!req.tenantDB,
+    hasPaymentModel: !!req.PaymentModel,
     tenantId: req.tenantId,
     timestamp: new Date().toISOString(),
   })
@@ -40,7 +58,7 @@ router.get("/summary", async (req, res) => {
   try {
     console.log("📊 Fetching payment summary...")
 
-    const PaymentModel = Payment(req.tenantDB)
+    const Payment = req.PaymentModel
 
     const today = new Date()
     today.setHours(0, 0, 0, 0)
@@ -50,7 +68,7 @@ router.get("/summary", async (req, res) => {
     thisMonth.setHours(0, 0, 0, 0)
 
     // Today's revenue (only successful payments)
-    const todayRevenue = await PaymentModel.aggregate([
+    const todayRevenue = await Payment.aggregate([
       {
         $match: {
           status: "success",
@@ -61,7 +79,7 @@ router.get("/summary", async (req, res) => {
     ])
 
     // This month's revenue (only successful payments)
-    const monthRevenue = await PaymentModel.aggregate([
+    const monthRevenue = await Payment.aggregate([
       {
         $match: {
           status: "success",
@@ -72,16 +90,16 @@ router.get("/summary", async (req, res) => {
     ])
 
     // Total revenue (only successful payments)
-    const totalRevenue = await PaymentModel.aggregate([
+    const totalRevenue = await Payment.aggregate([
       { $match: { status: "success" } },
       { $group: { _id: null, total: { $sum: "$amount" } } },
     ])
 
     // Additional stats for admin dashboard
-    const totalPayments = await PaymentModel.countDocuments()
-    const successfulPayments = await PaymentModel.countDocuments({ status: "success" })
-    const failedPayments = await PaymentModel.countDocuments({ status: "failed" })
-    const pendingPayments = await PaymentModel.countDocuments({ status: "pending" })
+    const totalPayments = await Payment.countDocuments()
+    const successfulPayments = await Payment.countDocuments({ status: "success" })
+    const failedPayments = await Payment.countDocuments({ status: "failed" })
+    const pendingPayments = await Payment.countDocuments({ status: "pending" })
 
     const summary = {
       todayRevenue: todayRevenue[0]?.total || 0,
@@ -112,7 +130,7 @@ router.get("/", async (req, res) => {
   try {
     console.log("💳 Fetching all payments...")
 
-    const PaymentModel = Payment(req.tenantDB)
+    const Payment = req.PaymentModel
 
     // Get query parameters for filtering
     const {
@@ -127,7 +145,7 @@ router.get("/", async (req, res) => {
     } = req.query
 
     // Build filter object
-    const filter = { tenantId: req.user.tenantId }
+    const filter = {}
 
     if (status && status !== "all") {
       filter.status = status
@@ -161,13 +179,13 @@ router.get("/", async (req, res) => {
     console.log("🔍 Payment query:", { filter, sort, limit: Number.parseInt(limit), skip })
 
     // Get payments with optional filtering and pagination
-    const payments = await PaymentModel.find(filter).sort(sort).limit(Number.parseInt(limit)).skip(skip).lean() // Use lean for better performance
+    const payments = await Payment.find(filter).sort(sort).limit(Number.parseInt(limit)).skip(skip).lean() // Use lean for better performance
 
     // Get total count for pagination
-    const totalCount = await PaymentModel.countDocuments(filter)
+    const totalCount = await Payment.countDocuments(filter)
 
     // Get summary stats for the filtered results
-    const summaryStats = await PaymentModel.aggregate([
+    const summaryStats = await Payment.aggregate([
       { $match: filter },
       {
         $group: {
@@ -210,22 +228,117 @@ router.get("/", async (req, res) => {
   }
 })
 
+// Get payment statistics
+router.get("/stats/overview", async (req, res) => {
+  try {
+    console.log("📈 Fetching payment statistics...")
+
+    const Payment = req.PaymentModel
+
+    // Get payments by status
+    const statusStats = await Payment.aggregate([
+      {
+        $group: {
+          _id: "$status",
+          count: { $sum: 1 },
+          totalAmount: { $sum: "$amount" },
+        },
+      },
+    ])
+
+    // Get payments by method
+    const methodStats = await Payment.aggregate([
+      {
+        $group: {
+          _id: "$method",
+          count: { $sum: 1 },
+          totalAmount: { $sum: "$amount" },
+        },
+      },
+    ])
+
+    // Get daily revenue for last 30 days (successful payments only)
+    const thirtyDaysAgo = new Date()
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
+
+    const dailyRevenue = await Payment.aggregate([
+      {
+        $match: {
+          status: "success",
+          createdAt: { $gte: thirtyDaysAgo },
+        },
+      },
+      {
+        $group: {
+          _id: {
+            year: { $year: "$createdAt" },
+            month: { $month: "$createdAt" },
+            day: { $dayOfMonth: "$createdAt" },
+          },
+          revenue: { $sum: "$amount" },
+          count: { $sum: 1 },
+        },
+      },
+      {
+        $sort: { "_id.year": 1, "_id.month": 1, "_id.day": 1 },
+      },
+    ])
+
+    // Get hourly distribution for today
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    const tomorrow = new Date(today)
+    tomorrow.setDate(tomorrow.getDate() + 1)
+
+    const hourlyStats = await Payment.aggregate([
+      {
+        $match: {
+          createdAt: { $gte: today, $lt: tomorrow },
+        },
+      },
+      {
+        $group: {
+          _id: { $hour: "$createdAt" },
+          count: { $sum: 1 },
+          revenue: { $sum: { $cond: [{ $eq: ["$status", "success"] }, "$amount", 0] } },
+        },
+      },
+      {
+        $sort: { _id: 1 },
+      },
+    ])
+
+    const stats = {
+      statusBreakdown: statusStats,
+      methodBreakdown: methodStats,
+      dailyRevenue: dailyRevenue,
+      hourlyDistribution: hourlyStats,
+      generatedAt: new Date().toISOString(),
+    }
+
+    console.log("✅ Payment statistics fetched")
+    res.json(stats)
+  } catch (error) {
+    console.error("❌ Payment statistics error:", error)
+    res.status(500).json({
+      error: "Failed to fetch payment statistics",
+      details: error.message,
+    })
+  }
+})
+
 // Get payment details - MUST come after other specific routes
 router.get("/:id", async (req, res) => {
   try {
     console.log("🔍 Fetching payment details for ID:", req.params.id)
 
-    const PaymentModel = Payment(req.tenantDB)
+    const Payment = req.PaymentModel
 
     // Try to find by MongoDB _id first, then by paymentId
-    let payment = await PaymentModel.findById(req.params.id)
-      .populate("orderId", "totalAmount status")
-      .populate("customerId", "firstName lastName email")
+    let payment = await Payment.findById(req.params.id)
 
     if (!payment) {
-      payment = await PaymentModel.findOne({ paymentId: req.params.id })
-        .populate("orderId", "totalAmount status")
-        .populate("customerId", "firstName lastName email")
+      payment = await Payment.findOne({ paymentId: req.params.id })
     }
 
     if (!payment) {
@@ -256,190 +369,125 @@ router.get("/:id", async (req, res) => {
   }
 })
 
-// Create a new payment (e.g., for manual entry or reconciliation)
-router.post("/", async (req, res) => {
+// Update payment status (admin action)
+router.put("/:id/status", async (req, res) => {
   try {
-    const PaymentModel = Payment(req.tenantDB)
-    const OrderModel = Order(req.tenantDB)
-    const CustomerModel = Customer(req.tenantDB)
+    console.log("🔄 Updating payment status for ID:", req.params.id)
 
-    const { orderId, customerId, amount, currency, method, transactionId, status, paymentDate, notes } = req.body
+    const { status, notes } = req.body
+    const validStatuses = ["pending", "success", "failed", "cancelled", "refunded"]
 
-    if (!orderId || !customerId || !amount || !method) {
-      return res.status(400).json({ error: "Order ID, Customer ID, Amount, and Method are required." })
+    if (!status || !validStatuses.includes(status)) {
+      return res.status(400).json({
+        error: "Invalid status",
+        validStatuses,
+        provided: status,
+      })
     }
 
-    const order = await OrderModel.findById(orderId)
-    if (!order) {
-      return res.status(404).json({ error: "Order not found." })
+    const Payment = req.PaymentModel
+
+    let payment = await Payment.findById(req.params.id)
+    if (!payment) {
+      payment = await Payment.findOne({ paymentId: req.params.id })
     }
 
-    const customer = await CustomerModel.findById(customerId)
-    if (!customer) {
-      return res.status(404).json({ error: "Customer not found." })
+    if (!payment) {
+      return res.status(404).json({ error: "Payment not found" })
     }
 
-    const newPayment = new PaymentModel({
-      orderId,
-      customerId,
-      amount,
-      currency,
-      method,
-      transactionId,
-      status,
-      paymentDate,
-      notes,
+    const oldStatus = payment.status
+    payment.status = status
+
+    if (notes) {
+      if (!payment.gatewayResponse) {
+        payment.gatewayResponse = {}
+      }
+      payment.gatewayResponse.adminNotes = notes
+      payment.gatewayResponse.statusUpdatedAt = new Date()
+      payment.gatewayResponse.statusUpdatedBy = req.user?.email || "admin"
+    }
+
+    await payment.save()
+
+    console.log(`✅ Payment status updated: ${oldStatus} → ${status}`)
+
+    res.json({
+      message: "Payment status updated successfully",
+      payment: {
+        id: payment._id,
+        paymentId: payment.paymentId,
+        orderId: payment.orderId,
+        oldStatus,
+        newStatus: status,
+        updatedAt: payment.updatedAt,
+      },
     })
-
-    await newPayment.save()
-    res.status(201).json(newPayment)
   } catch (error) {
-    console.error("❌ Error creating payment:", error)
-    if (error.code === 11000 && error.keyPattern && error.keyPattern.transactionId) {
-      return res.status(409).json({ error: "Payment with this transaction ID already exists." })
-    }
-    res.status(500).json({ error: "Internal server error." })
-  }
-})
-
-// Update payment status or details
-router.put("/:id", async (req, res) => {
-  try {
-    const PaymentModel = Payment(req.tenantDB)
-    const updatedPayment = await PaymentModel.findByIdAndUpdate(req.params.id, req.body, {
-      new: true,
-      runValidators: true,
-    })
-    if (!updatedPayment) {
-      return res.status(404).json({ error: "Payment not found." })
-    }
-    res.status(200).json(updatedPayment)
-  } catch (error) {
-    console.error("❌ Error updating payment:", error)
-    if (error.code === 11000 && error.keyPattern && error.keyPattern.transactionId) {
-      return res.status(409).json({ error: "Payment with this transaction ID already exists." })
-    }
-    res.status(500).json({ error: "Internal server error." })
-  }
-})
-
-// Delete a payment (use with caution)
-router.delete("/:id", async (req, res) => {
-  try {
-    const PaymentModel = Payment(req.tenantDB)
-    const deletedPayment = await PaymentModel.findByIdAndDelete(req.params.id)
-    if (!deletedPayment) {
-      return res.status(404).json({ error: "Payment not found." })
-    }
-    res.status(200).json({ message: "Payment deleted successfully." })
-  } catch (error) {
-    console.error("❌ Error deleting payment:", error)
-    res.status(500).json({ error: "Internal server error." })
-  }
-})
-
-// Get payment statistics
-router.get("/stats/overview", async (req, res) => {
-  try {
-    console.log("📈 Fetching payment statistics...")
-
-    const PaymentModel = Payment(req.tenantDB)
-
-    // Get payments by status
-    const statusStats = await PaymentModel.aggregate([
-      {
-        $match: { tenantId: req.user.tenantId },
-      },
-      {
-        $group: {
-          _id: "$status",
-          count: { $sum: 1 },
-          totalAmount: { $sum: "$amount" },
-        },
-      },
-    ])
-
-    // Get payments by method
-    const methodStats = await PaymentModel.aggregate([
-      {
-        $match: { tenantId: req.user.tenantId },
-      },
-      {
-        $group: {
-          _id: "$method",
-          count: { $sum: 1 },
-          totalAmount: { $sum: "$amount" },
-        },
-      },
-    ])
-
-    // Get daily revenue for last 30 days (successful payments only)
-    const thirtyDaysAgo = new Date()
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
-
-    const dailyRevenue = await PaymentModel.aggregate([
-      {
-        $match: {
-          status: "success",
-          createdAt: { $gte: thirtyDaysAgo },
-          tenantId: req.user.tenantId,
-        },
-      },
-      {
-        $group: {
-          _id: {
-            year: { $year: "$createdAt" },
-            month: { $month: "$createdAt" },
-            day: { $dayOfMonth: "$createdAt" },
-          },
-          revenue: { $sum: "$amount" },
-          count: { $sum: 1 },
-        },
-      },
-      {
-        $sort: { "_id.year": 1, "_id.month": 1, "_id.day": 1 },
-      },
-    ])
-
-    // Get hourly distribution for today
-    const today = new Date()
-    today.setHours(0, 0, 0, 0)
-    const tomorrow = new Date(today)
-    tomorrow.setDate(tomorrow.getDate() + 1)
-
-    const hourlyStats = await PaymentModel.aggregate([
-      {
-        $match: {
-          createdAt: { $gte: today, $lt: tomorrow },
-          tenantId: req.user.tenantId,
-        },
-      },
-      {
-        $group: {
-          _id: { $hour: "$createdAt" },
-          count: { $sum: 1 },
-          revenue: { $sum: { $cond: [{ $eq: ["$status", "success"] }, "$amount", 0] } },
-        },
-      },
-      {
-        $sort: { _id: 1 },
-      },
-    ])
-
-    const stats = {
-      statusBreakdown: statusStats,
-      methodBreakdown: methodStats,
-      dailyRevenue: dailyRevenue,
-      hourlyDistribution: hourlyStats,
-      generatedAt: new Date().toISOString(),
-    }
-
-    console.log("✅ Payment statistics fetched")
-    res.json(stats)
-  } catch (error) {
-    console.error("❌ Payment statistics error:", error)
+    console.error("❌ Update payment status error:", error)
     res.status(500).json({
-      error: "Failed to fetch payment statistics",
+      error: "Failed to update payment status",
+      details: error.message,
+    })
+  }
+})
+
+// Export payments data (CSV format)
+router.get("/export/csv", async (req, res) => {
+  try {
+    console.log("📊 Exporting payments to CSV...")
+
+    const { startDate, endDate, status, method } = req.query
+    const Payment = req.PaymentModel
+
+    // Build filter
+    const filter = {}
+    if (status && status !== "all") filter.status = status
+    if (method && method !== "all") filter.method = method
+    if (startDate || endDate) {
+      filter.createdAt = {}
+      if (startDate) filter.createdAt.$gte = new Date(startDate)
+      if (endDate) {
+        const endDateTime = new Date(endDate)
+        endDateTime.setHours(23, 59, 59, 999)
+        filter.createdAt.$lte = endDateTime
+      }
+    }
+
+    const payments = await Payment.find(filter)
+      .sort({ createdAt: -1 })
+      .limit(10000) // Limit for performance
+      .lean()
+
+    // Generate CSV content
+    const csvHeaders = ["Payment ID", "Order ID", "Amount", "Status", "Method", "Created At", "Updated At"].join(",")
+
+    const csvRows = payments.map((payment) =>
+      [
+        payment.paymentId || payment._id,
+        payment.orderId || "",
+        payment.amount || 0,
+        payment.status || "",
+        payment.method || "",
+        payment.createdAt ? new Date(payment.createdAt).toISOString() : "",
+        payment.updatedAt ? new Date(payment.updatedAt).toISOString() : "",
+      ].join(","),
+    )
+
+    const csvContent = [csvHeaders, ...csvRows].join("\n")
+
+    res.setHeader("Content-Type", "text/csv")
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="payments-export-${new Date().toISOString().split("T")[0]}.csv"`,
+    )
+    res.send(csvContent)
+
+    console.log(`✅ Exported ${payments.length} payments to CSV`)
+  } catch (error) {
+    console.error("❌ Export payments error:", error)
+    res.status(500).json({
+      error: "Failed to export payments",
       details: error.message,
     })
   }

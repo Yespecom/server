@@ -1,9 +1,9 @@
-const mongoose = require("mongoose")
-
 module.exports = (tenantDB) => {
+  const mongoose = require("mongoose")
+
   const offerSchema = new mongoose.Schema(
     {
-      name: {
+      title: {
         type: String,
         required: true,
         trim: true,
@@ -12,28 +12,43 @@ module.exports = (tenantDB) => {
         type: String,
         trim: true,
       },
-      discountType: {
+      type: {
         type: String,
-        enum: ["percentage", "fixed_amount"],
+        enum: ["percentage", "fixed", "bogo", "free_shipping"],
         required: true,
       },
-      discountValue: {
+      value: {
         type: Number,
         required: true,
-        min: 0,
       },
-      applicableTo: {
+      code: {
         type: String,
-        enum: ["all_products", "specific_products", "specific_categories"],
-        default: "all_products",
+        unique: true,
+        sparse: true,
+        uppercase: true,
       },
-      productIds: [
+      minOrderValue: {
+        type: Number,
+        default: 0,
+      },
+      maxDiscount: {
+        type: Number,
+      },
+      usageLimit: {
+        type: Number,
+        default: null, // null means unlimited
+      },
+      usedCount: {
+        type: Number,
+        default: 0,
+      },
+      applicableProducts: [
         {
           type: mongoose.Schema.Types.ObjectId,
           ref: "Product",
         },
       ],
-      categoryIds: [
+      applicableCategories: [
         {
           type: mongoose.Schema.Types.ObjectId,
           ref: "Category",
@@ -51,23 +66,69 @@ module.exports = (tenantDB) => {
         type: Boolean,
         default: true,
       },
-      minimumOrderAmount: {
-        type: Number,
-        default: 0,
-        min: 0,
-      },
-      usageLimit: {
-        type: Number,
-        min: 0,
-        default: 0, // 0 means unlimited
-      },
-      timesUsed: {
-        type: Number,
-        default: 0,
+      isPublic: {
+        type: Boolean,
+        default: true,
       },
     },
-    { timestamps: true },
+    {
+      timestamps: true,
+    },
   )
 
-  return tenantDB.model("Offer", offerSchema)
+  // Indexes
+  offerSchema.index({ code: 1 })
+  offerSchema.index({ isActive: 1 })
+  offerSchema.index({ startDate: 1, endDate: 1 })
+  offerSchema.index({ type: 1 })
+
+  // Virtual to check if offer is currently valid
+  offerSchema.virtual("isValid").get(function () {
+    const now = new Date()
+    return (
+      this.isActive &&
+      this.startDate <= now &&
+      this.endDate >= now &&
+      (this.usageLimit === null || this.usedCount < this.usageLimit)
+    )
+  })
+
+  // Method to apply offer
+  offerSchema.methods.applyOffer = function (orderValue, productIds = []) {
+    if (!this.isValid) {
+      return { success: false, message: "Offer is not valid" }
+    }
+
+    if (orderValue < this.minOrderValue) {
+      return { success: false, message: `Minimum order value is ${this.minOrderValue}` }
+    }
+
+    let discount = 0
+
+    switch (this.type) {
+      case "percentage":
+        discount = (orderValue * this.value) / 100
+        if (this.maxDiscount && discount > this.maxDiscount) {
+          discount = this.maxDiscount
+        }
+        break
+      case "fixed":
+        discount = Math.min(this.value, orderValue)
+        break
+      case "free_shipping":
+        discount = 0 // Handled separately in shipping calculation
+        break
+      default:
+        return { success: false, message: "Invalid offer type" }
+    }
+
+    return {
+      success: true,
+      discount: discount,
+      type: this.type,
+      title: this.title,
+    }
+  }
+
+  return tenantDB.models.Offer || tenantDB.model("Offer", offerSchema)
 }

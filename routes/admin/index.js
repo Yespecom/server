@@ -65,15 +65,15 @@ router.all("/test", (req, res) => {
   })
 })
 
-// Import individual admin route modules
-const categoriesRouter = require("./categories")
-const offersRouter = require("./offers")
-const ordersRouter = require("./orders")
-const productsRouter = require("./products")
-const paymentsRouter = require("./payments")
-const customersRouter = require("./customers")
-const dashboardRouter = require("./dashboard")
-const settingsRouter = require("./settings")
+// Import all admin routes
+const productsRoutes = require("./products")
+const categoriesRoutes = require("./categories")
+const ordersRoutes = require("./orders")
+const customersRoutes = require("./customers")
+const offersRoutes = require("./offers")
+const settingsRoutes = require("./settings")
+const dashboardRoutes = require("./dashboard")
+const paymentsRoutes = require("./payments")
 
 // Middleware to ensure tenant DB is available
 const ensureTenantDB = async (req, res, next) => {
@@ -102,15 +102,80 @@ const ensureTenantDB = async (req, res, next) => {
 // Apply tenant DB middleware to all admin routes
 router.use(ensureTenantDB)
 
-// Mount individual routers under their respective paths
-router.use("/categories", categoriesRouter)
-router.use("/offers", offersRouter)
-router.use("/orders", ordersRouter)
-router.use("/products", productsRouter)
-router.use("/payments", paymentsRouter)
-router.use("/customers", customersRouter)
-router.use("/dashboard", dashboardRouter)
-router.use("/settings", settingsRouter)
+// Mount routes with logging
+router.use(
+  "/products",
+  (req, res, next) => {
+    console.log("📦 Products route matched")
+    next()
+  },
+  productsRoutes,
+)
+
+router.use(
+  "/categories",
+  (req, res, next) => {
+    console.log("🗂️ Categories route matched")
+    next()
+  },
+  categoriesRoutes,
+)
+
+router.use(
+  "/orders",
+  (req, res, next) => {
+    console.log("📋 Orders route matched")
+    next()
+  },
+  ordersRoutes,
+)
+
+router.use(
+  "/customers",
+  (req, res, next) => {
+    console.log("👥 Customers route matched")
+    next()
+  },
+  customersRoutes,
+)
+
+router.use(
+  "/offers",
+  (req, res, next) => {
+    console.log("🎁 Offers route matched")
+    next()
+  },
+  offersRoutes,
+)
+
+router.use(
+  "/settings",
+  (req, res, next) => {
+    console.log(`⚙️ Settings route matched - path: ${req.path}`)
+    console.log(`⚙️ Settings route matched - originalUrl: ${req.originalUrl}`)
+    console.log(`⚙️ Settings route matched - method: ${req.method}`)
+    next()
+  },
+  settingsRoutes,
+)
+
+router.use(
+  "/dashboard",
+  (req, res, next) => {
+    console.log("📊 Dashboard route matched")
+    next()
+  },
+  dashboardRoutes,
+)
+
+router.use(
+  "/payments",
+  (req, res, next) => {
+    console.log("💳 Payments route matched")
+    next()
+  },
+  paymentsRoutes,
+)
 
 // Admin dashboard stats
 router.get("/stats", async (req, res) => {
@@ -202,14 +267,14 @@ router.get("/debug/routes", (req, res) => {
       "GET /api/admin/stats",
       "GET /api/admin/store-info",
       "GET /api/admin/debug/routes",
-      "* /api/admin/categories/*",
-      "* /api/admin/offers/*",
-      "* /api/admin/orders/*",
       "* /api/admin/products/*",
-      "* /api/admin/payments/*",
+      "* /api/admin/categories/*",
+      "* /api/admin/orders/*",
       "* /api/admin/customers/*",
-      "* /api/admin/dashboard/*",
+      "* /api/admin/offers/*",
       "* /api/admin/settings/*",
+      "* /api/admin/dashboard/*",
+      "* /api/admin/payments/*",
     ],
     currentRequest: {
       method: req.method,
@@ -219,11 +284,6 @@ router.get("/debug/routes", (req, res) => {
     },
     timestamp: new Date().toISOString(),
   })
-})
-
-// Example admin root route
-router.get("/", (req, res) => {
-  res.json({ message: "Welcome to the Admin API!" })
 })
 
 module.exports = router

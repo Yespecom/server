@@ -1,21 +1,14 @@
 const express = require("express")
 const cors = require("cors")
-const path = require("path")
-const mongoose = require("mongoose") // Import mongoose for graceful shutdown of main connection
-const multer = require("multer") // For handling file uploads
+const dotenv = require("dotenv")
+const mongoose = require("mongoose")
+const multer = require("multer")
 
 // Load environment variables
-require("dotenv").config()
+dotenv.config()
 
 const app = express()
 const PORT = process.env.PORT || 5000
-
-// Database connections
-const { getMainDb } = require("./db/connection")
-const { closeAllTenantDBs } = require("./config/tenantDB")
-
-// Connect to main database at startup
-getMainDb()
 
 // Middleware
 app.use(cors())
@@ -41,19 +34,25 @@ app.use(
 )
 
 app.use(express.urlencoded({ extended: true }))
-app.use("/uploads", express.static("uploads")) // Serve static files from 'uploads' directory
+app.use("/uploads", express.static("uploads"))
 
 // Import routes
 const authRoutes = require("./routes/auth")
-const adminRoutes = require("./routes/admin") // This should be the main admin router (index.js)
-const storeRoutes = require("./routes/store") // This should be the main store router (index.js)
+const adminRoutes = require("./routes/admin")
+const storeRoutes = require("./routes/store")
 const otpRoutes = require("./routes/otp")
 const passwordResetRoutes = require("./routes/password-reset")
 
 // Import middleware
 const authMiddleware = require("./middleware/auth")
 const storeContextMiddleware = require("./middleware/storeContext")
-const subdomainMiddleware = require("./middleware/subdomain") // Assuming this is needed globally
+
+// Database connections
+const connectMainDB = require("./config/mainDB")
+const { closeAllTenantDBs } = require("./config/tenantDB")
+
+// Connect to main database
+connectMainDB()
 
 // Add detailed logging middleware - BEFORE route registration
 app.use((req, res, next) => {
@@ -66,6 +65,7 @@ app.use((req, res, next) => {
     authorization: req.get("authorization") ? "Bearer ***" : "None",
     "content-type": req.get("content-type"),
   })
+
   next()
 })
 
@@ -82,11 +82,12 @@ app.use((req, res, next) => {
     console.log(`✅ Should be handled by OTP routes`)
   } else if (path.startsWith("/api/password-reset")) {
     console.log(`✅ Should be handled by password reset routes`)
-  } else if (path.match(/^\/api\/[A-Z0-9]{6}/i)) {
+  } else if (path.match(/^\/api\/[A-Z0-9]{6}$/i)) {
     console.log(`✅ Looks like a store route with storeId: ${path.split("/")[2]}`)
   } else {
     console.log(`⚠️ Unknown route pattern: ${path}`)
   }
+
   next()
 })
 
@@ -101,9 +102,6 @@ app.get("/health", (req, res) => {
     environment: process.env.NODE_ENV || "development",
   })
 })
-
-// Apply subdomain middleware globally if needed, or specifically to store routes
-app.use(subdomainMiddleware) // Assuming this needs to run for all requests to determine tenant
 
 // Authentication routes (must come before store routes)
 app.use(
@@ -147,19 +145,19 @@ app.use(
     console.log("👑 Method:", req.method)
     next()
   },
-  authMiddleware, // Apply auth middleware for admin routes
-  adminRoutes, // This is the express.Router() from routes/admin/index.js
+  authMiddleware,
+  adminRoutes,
 )
 console.log("✅ Admin routes registered at /api/admin")
 
 // CRITICAL FIX: Add a catch-all middleware to prevent admin routes from falling through
-// This is a safety net, ideally, adminRoutes should handle all its paths.
 app.use("/api/admin/*", (req, res, next) => {
   console.log("❌ CRITICAL: Admin route fell through to catch-all handler")
   console.log("❌ This means the admin route didn't send a response")
   console.log("❌ URL:", req.originalUrl)
   console.log("❌ Method:", req.method)
 
+  // If we reach here, it means the admin route didn't handle the request properly
   if (!res.headersSent) {
     return res.status(500).json({
       error: "Admin route handler failed",
@@ -198,7 +196,7 @@ app.use(
     }
 
     // IMPORTANT: Skip store middleware for known non-store routes
-    const nonStoreRoutes = ["auth", "admin", "otp", "password-reset", "health", "user"] // 'user' might be a specific main user route
+    const nonStoreRoutes = ["auth", "admin", "otp", "password-reset", "health", "user"]
 
     if (nonStoreRoutes.includes(storeId)) {
       console.log(`❌ Route ${storeId} should NOT reach store handler - this indicates a routing problem`)
@@ -226,9 +224,9 @@ app.use(
 
     // Apply store context middleware for actual store routes
     console.log(`🛍️ Applying store context middleware for store: ${storeId}`)
-    storeContextMiddleware(req, res, next) // This middleware should set req.tenantDb
+    storeContextMiddleware(req, res, next)
   },
-  storeRoutes, // This is the express.Router() from routes/store.js
+  storeRoutes,
 )
 console.log("✅ Store routes registered at /api/:storeId with context middleware")
 
@@ -255,7 +253,7 @@ app.use((err, req, res, next) => {
   }
 
   // Handle other errors
-  res.status(err.statusCode || 500).json({
+  res.status(500).json({
     error: "Something went wrong!",
     details: process.env.NODE_ENV === "development" ? err.message : undefined,
   })
@@ -283,13 +281,8 @@ app.use("*", (req, res) => {
 // Graceful shutdown
 process.on("SIGINT", async () => {
   console.log("🛑 Shutting down gracefully...")
-  await closeAllTenantDBs() // Close all tenant connections
-  const mainConnection = getMainDb()
-  if (mainConnection && mainConnection.readyState === 1) {
-    // Check if main connection is open
-    await mainConnection.close()
-    console.log("🔌 Main database connection closed.")
-  }
+  await closeAllTenantDBs()
+  await mongoose.connection.close()
   process.exit(0)
 })
 

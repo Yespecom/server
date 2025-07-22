@@ -1,36 +1,119 @@
 const axios = require("axios")
 
-const sendSMS = async (phoneNumber, message) => {
-  if (!process.env.FAST2SMS_API_KEY || !process.env.FAST2SMS_SENDER_ID) {
-    console.warn("⚠️ SMS sending skipped: FAST2SMS_API_KEY or FAST2SMS_SENDER_ID not set.")
-    return { success: false, message: "SMS service not configured." }
-  }
-
-  const url = "https://www.fast2sms.com/devUtility/sms"
-  const payload = {
-    variables_values: message,
-    route: "otp", // Or "q" for quick transactional
-    numbers: phoneNumber,
-  }
-
+const sendSMS = async (phone, message) => {
   try {
-    const response = await axios.post(url, payload, {
-      headers: {
-        authorization: process.env.FAST2SMS_API_KEY,
-        "Content-Type": "application/json",
-      },
-    })
+    console.log(`📱 Sending SMS to ${phone}: ${message}`)
 
-    if (response.data && response.data.return === true) {
-      console.log(`✅ SMS sent to ${phoneNumber}: ${message}`)
-      return { success: true, data: response.data }
+    // Check if Fast2SMS is configured
+    if (process.env.FAST2SMS_API_KEY) {
+      // Use Fast2SMS for production
+      const fast2smsUrl = "https://www.fast2sms.com/dev/bulkV2"
+
+      // Clean phone number (remove + and country code if present)
+      let cleanPhone = phone.replace(/\s+/g, "").replace(/^\+/, "")
+
+      // If phone starts with country code, remove it (assuming Indian numbers)
+      if (cleanPhone.startsWith("91") && cleanPhone.length === 12) {
+        cleanPhone = cleanPhone.substring(2)
+      }
+
+      // Validate Indian mobile number (10 digits starting with 6-9)
+      if (!/^[6-9]\d{9}$/.test(cleanPhone)) {
+        throw new Error(`Invalid Indian mobile number format: ${cleanPhone}`)
+      }
+
+      console.log(`📱 Using Fast2SMS API`)
+      console.log(`📱 API Key (first 10 chars): ${process.env.FAST2SMS_API_KEY.substring(0, 10)}...`)
+
+      // Simple payload without sender ID (Fast2SMS will use default)
+      const payload = {
+        authorization: process.env.FAST2SMS_API_KEY,
+        message: message,
+        language: "english",
+        route: "q", // Quality route (promotional)
+        numbers: cleanPhone,
+      }
+
+      // Only add sender_id if explicitly provided in env
+      if (process.env.FAST2SMS_SENDER_ID) {
+        payload.sender_id = process.env.FAST2SMS_SENDER_ID
+        console.log(`📱 Using custom sender ID: ${process.env.FAST2SMS_SENDER_ID}`)
+      } else {
+        console.log(`📱 Using default sender ID (Fast2SMS will choose)`)
+      }
+
+      try {
+        const response = await axios.post(fast2smsUrl, payload, {
+          headers: {
+            "Content-Type": "application/json",
+          },
+          timeout: 15000, // 15 second timeout
+        })
+
+        console.log(`📱 Fast2SMS response status:`, response.status)
+        console.log(`📱 Fast2SMS response data:`, response.data)
+
+        if (response.data.return === true) {
+          console.log(`✅ SMS sent successfully via Fast2SMS`)
+          return {
+            success: true,
+            messageId: response.data.request_id,
+            provider: "fast2sms",
+            details: response.data,
+          }
+        } else {
+          // Handle specific Fast2SMS error responses
+          if (response.data.status_code === 412) {
+            throw new Error(
+              `Fast2SMS Authentication Error: Invalid API key. Please get a new API key from https://www.fast2sms.com/ > Dashboard > API Keys`,
+            )
+          } else if (response.data.status_code === 400) {
+            throw new Error(`Fast2SMS Request Error: ${response.data.message || "Bad request"}`)
+          } else {
+            throw new Error(`Fast2SMS Error: ${response.data.message || "Unknown error"}`)
+          }
+        }
+      } catch (error) {
+        console.error(`❌ Fast2SMS API Error:`, error.response?.data || error.message)
+
+        // Handle specific Fast2SMS errors
+        if (error.response?.data?.status_code === 412) {
+          throw new Error(
+            `Fast2SMS Authentication Error: Invalid API key. Please check your FAST2SMS_API_KEY in .env file. ` +
+              `Go to https://www.fast2sms.com/ > Dashboard > API Keys to get a valid key.`,
+          )
+        } else if (error.response?.data?.status_code === 400) {
+          throw new Error(`Fast2SMS Request Error: ${error.response.data.message || "Bad request"}`)
+        } else if (error.response) {
+          throw new Error(`Fast2SMS API Error: ${error.response.data.message || error.response.statusText}`)
+        } else if (error.request) {
+          throw new Error(`Network error while sending SMS: ${error.message}`)
+        } else {
+          throw new Error(`Failed to send SMS: ${error.message}`)
+        }
+      }
     } else {
-      console.error(`❌ SMS sending failed to ${phoneNumber}:`, response.data)
-      return { success: false, message: response.data.message || "Unknown SMS error", data: response.data }
+      // For development/testing - just log the SMS
+      console.log(`📱 DEV MODE - SMS to ${phone}: ${message}`)
+      console.log(`⚠️ Fast2SMS not configured. Add FAST2SMS_API_KEY to .env`)
+      console.log(`📋 Fast2SMS Setup Guide:`)
+      console.log(`   1. Sign up at https://www.fast2sms.com/`)
+      console.log(`   2. Add credits to your account`)
+      console.log(`   3. Go to Dashboard > API Keys`)
+      console.log(`   4. Copy your API key`)
+      console.log(`   5. Add FAST2SMS_API_KEY=your_api_key to .env`)
+      console.log(`   6. Sender ID is optional - system will use defaults`)
+
+      return {
+        success: true,
+        messageId: `dev_${Date.now()}`,
+        provider: "development",
+        devMode: true,
+      }
     }
   } catch (error) {
-    console.error(`❌ Error sending SMS to ${phoneNumber}:`, error.message)
-    return { success: false, message: "Failed to send SMS due to network or API error.", error: error.message }
+    console.error("❌ SMS sending error:", error)
+    throw error
   }
 }
 
@@ -85,12 +168,11 @@ const testSMS = async (phone, testMessage = "Test message from your store") => {
 // Validate Fast2SMS configuration - SIMPLIFIED
 const validateFast2SMSConfig = () => {
   const apiKey = process.env.FAST2SMS_API_KEY
-  const senderId = process.env.FAST2SMS_SENDER_ID
 
-  if (!apiKey || !senderId) {
+  if (!apiKey) {
     return {
       valid: false,
-      error: "FAST2SMS_API_KEY or FAST2SMS_SENDER_ID not found in environment variables",
+      error: "FAST2SMS_API_KEY not found in environment variables",
       help: [
         "1. Sign up at https://www.fast2sms.com/",
         "2. Add credits to your account",

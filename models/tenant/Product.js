@@ -31,6 +31,10 @@ module.exports = (tenantDB) => {
         required: true,
         min: 0,
       },
+      originalPrice: {
+        type: Number,
+        min: 0,
+      },
       comparePrice: {
         type: Number,
         min: 0,
@@ -38,6 +42,12 @@ module.exports = (tenantDB) => {
       costPrice: {
         type: Number,
         min: 0,
+      },
+      taxPercentage: {
+        type: Number,
+        default: 0,
+        min: 0,
+        max: 100,
       },
       category: {
         type: mongoose.Schema.Types.ObjectId,
@@ -50,6 +60,14 @@ module.exports = (tenantDB) => {
           ref: "Category",
         },
       ],
+      offer: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Offer",
+        default: null,
+      },
+      // Updated image structure to match frontend expectations
+      gallery: [String], // Array of image URLs
+      thumbnail: String, // Primary image URL
       images: [
         {
           url: String,
@@ -60,6 +78,21 @@ module.exports = (tenantDB) => {
           },
         },
       ],
+      // Updated inventory structure
+      stock: {
+        type: Number,
+        default: 0,
+        min: 0,
+      },
+      lowStockAlert: {
+        type: Number,
+        default: 5,
+        min: 0,
+      },
+      allowBackorders: {
+        type: Boolean,
+        default: false,
+      },
       inventory: {
         trackQuantity: {
           type: Boolean,
@@ -78,13 +111,28 @@ module.exports = (tenantDB) => {
           default: false,
         },
       },
+      // Updated variants structure to match frontend
+      hasVariants: {
+        type: Boolean,
+        default: false,
+      },
       variants: [
         {
-          name: String,
-          value: String,
-          price: Number,
+          _id: {
+            type: mongoose.Schema.Types.ObjectId,
+            default: () => new mongoose.Types.ObjectId(),
+          },
+          name: String, // e.g., "Red / Large"
+          options: [String], // Array of option values
+          price: String, // Keep as string to match frontend
+          originalPrice: String,
+          stock: String,
           sku: String,
-          quantity: Number,
+          isActive: {
+            type: Boolean,
+            default: true,
+          },
+          image: String, // Variant-specific image URL
         },
       ],
       attributes: [
@@ -96,11 +144,21 @@ module.exports = (tenantDB) => {
       weight: {
         type: Number,
         min: 0,
+        default: 0,
       },
       dimensions: {
-        length: Number,
-        width: Number,
-        height: Number,
+        length: {
+          type: Number,
+          default: 0,
+        },
+        width: {
+          type: Number,
+          default: 0,
+        },
+        height: {
+          type: Number,
+          default: 0,
+        },
       },
       isActive: {
         type: Boolean,
@@ -111,6 +169,9 @@ module.exports = (tenantDB) => {
         default: false,
       },
       tags: [String],
+      // SEO fields to match frontend
+      metaTitle: String,
+      metaDescription: String,
       seo: {
         title: String,
         description: String,
@@ -162,11 +223,26 @@ module.exports = (tenantDB) => {
         .replace(/[^a-z0-9]+/g, "-")
         .replace(/(^-|-$)/g, "")
     }
+
+    // Sync inventory fields
+    if (this.stock !== undefined) {
+      this.inventory.quantity = this.stock
+    }
+    if (this.lowStockAlert !== undefined) {
+      this.inventory.lowStockThreshold = this.lowStockAlert
+    }
+    if (this.allowBackorders !== undefined) {
+      this.inventory.allowBackorder = this.allowBackorders
+    }
+
     next()
   })
 
   // Virtual for discount percentage
   productSchema.virtual("discountPercentage").get(function () {
+    if (this.originalPrice && this.originalPrice > this.price) {
+      return Math.round(((this.originalPrice - this.price) / this.originalPrice) * 100)
+    }
     if (this.comparePrice && this.comparePrice > this.price) {
       return Math.round(((this.comparePrice - this.price) / this.comparePrice) * 100)
     }
@@ -175,9 +251,12 @@ module.exports = (tenantDB) => {
 
   // Virtual for stock status
   productSchema.virtual("stockStatus").get(function () {
+    const quantity = this.stock || this.inventory.quantity || 0
+    const threshold = this.lowStockAlert || this.inventory.lowStockThreshold || 5
+
     if (!this.inventory.trackQuantity) return "in_stock"
-    if (this.inventory.quantity <= 0) return "out_of_stock"
-    if (this.inventory.quantity <= this.inventory.lowStockThreshold) return "low_stock"
+    if (quantity <= 0) return "out_of_stock"
+    if (quantity <= threshold) return "low_stock"
     return "in_stock"
   })
 
@@ -185,8 +264,10 @@ module.exports = (tenantDB) => {
   productSchema.methods.isAvailable = function (quantity = 1) {
     if (!this.isActive) return false
     if (!this.inventory.trackQuantity) return true
-    if (this.inventory.quantity >= quantity) return true
-    return this.inventory.allowBackorder
+
+    const availableStock = this.stock || this.inventory.quantity || 0
+    if (availableStock >= quantity) return true
+    return this.allowBackorders || this.inventory.allowBackorder
   }
 
   // Method to update stock
@@ -194,11 +275,25 @@ module.exports = (tenantDB) => {
     if (!this.inventory.trackQuantity) return
 
     if (operation === "subtract") {
-      this.inventory.quantity = Math.max(0, this.inventory.quantity - quantity)
+      this.stock = Math.max(0, (this.stock || 0) - quantity)
+      this.inventory.quantity = this.stock
     } else if (operation === "add") {
-      this.inventory.quantity += quantity
+      this.stock = (this.stock || 0) + quantity
+      this.inventory.quantity = this.stock
     }
   }
 
-  return tenantDB.models.Product || tenantDB.model("Product", productSchema)
+  // Ensure virtuals are included in JSON output
+  productSchema.set("toJSON", { virtuals: true })
+  productSchema.set("toObject", { virtuals: true })
+
+  // Try to get existing model, create if missing
+  try {
+    return tenantDB.model("Product")
+  } catch (e) {
+    if (e.name === "MissingSchemaError") {
+      return tenantDB.model("Product", productSchema)
+    }
+    throw e
+  }
 }

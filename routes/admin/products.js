@@ -217,6 +217,52 @@ router.get("/test-connection", async (req, res) => {
   }
 })
 
+// Test Cloudinary connection
+router.get("/test-cloudinary", async (req, res) => {
+  try {
+    console.log("🧪 Testing Cloudinary configuration...")
+
+    // Check if Cloudinary config exists
+    const cloudinary = require("cloudinary").v2
+    const config = cloudinary.config()
+
+    const testData = {
+      hasCloudName: !!config.cloud_name,
+      hasApiKey: !!config.api_key,
+      hasApiSecret: !!config.api_secret,
+      cloudName: config.cloud_name,
+      timestamp: new Date().toISOString(),
+    }
+
+    console.log("🧪 Cloudinary config test:", testData)
+
+    // Try to get account details (this will fail if credentials are wrong)
+    try {
+      const result = await cloudinary.api.ping()
+      testData.pingResult = result
+      testData.connectionStatus = "success"
+    } catch (pingError) {
+      console.error("❌ Cloudinary ping failed:", pingError)
+      testData.connectionStatus = "failed"
+      testData.pingError = pingError.message
+    }
+
+    res.json({
+      success: true,
+      message: "Cloudinary test completed",
+      data: testData,
+    })
+  } catch (error) {
+    console.error("❌ Cloudinary test error:", error)
+    res.status(500).json({
+      success: false,
+      error: "Cloudinary test failed",
+      details: error.message,
+      stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
+    })
+  }
+})
+
 // Get all products
 router.get("/", async (req, res) => {
   try {
@@ -688,33 +734,100 @@ router.delete("/:id", async (req, res) => {
   }
 })
 
-// Upload single image endpoint
+// Upload single image endpoint - FIXED VERSION
 router.post("/upload-image", fileUpload.single("image"), async (req, res) => {
   try {
+    console.log("📸 Upload image endpoint hit")
+    console.log("📋 Request headers:", req.headers)
+    console.log("📋 Request file:", req.file ? "File present" : "No file")
+    console.log("📋 Request body:", req.body)
+
     if (!req.file) {
+      console.error("❌ No file provided")
       return res.status(400).json({
         success: false,
         error: "No image file provided",
       })
     }
 
-    console.log("📸 Uploading single image...")
+    console.log("📸 File details:", {
+      originalname: req.file.originalname,
+      mimetype: req.file.mimetype,
+      size: req.file.size,
+      buffer: req.file.buffer ? "Buffer present" : "No buffer",
+    })
 
+    // Validate file type
+    if (!req.file.mimetype.startsWith("image/")) {
+      console.error("❌ Invalid file type:", req.file.mimetype)
+      return res.status(415).json({
+        success: false,
+        error: "Only image files are allowed",
+      })
+    }
+
+    // Validate file size (10MB limit)
+    if (req.file.size > 10 * 1024 * 1024) {
+      console.error("❌ File too large:", req.file.size)
+      return res.status(413).json({
+        success: false,
+        error: "File size must be less than 10MB",
+      })
+    }
+
+    console.log("📸 Starting Cloudinary upload...")
+
+    // Upload to Cloudinary
     const result = await upload(req.file.buffer, "yesp-products")
 
-    console.log("✅ Image uploaded successfully:", result.public_id)
+    console.log("✅ Cloudinary upload successful:", {
+      public_id: result.public_id,
+      secure_url: result.secure_url,
+      width: result.width,
+      height: result.height,
+    })
 
     res.json({
       success: true,
       imageUrl: result.secure_url,
       publicId: result.public_id,
+      width: result.width,
+      height: result.height,
     })
   } catch (error) {
-    console.error("❌ Upload error:", error)
+    console.error("❌ Upload image error:", error)
+    console.error("❌ Error stack:", error.stack)
+
+    // Handle specific Cloudinary errors
+    if (error.message && error.message.includes("Invalid image file")) {
+      return res.status(415).json({
+        success: false,
+        error: "Invalid image file format",
+        details: error.message,
+      })
+    }
+
+    if (error.message && error.message.includes("File size too large")) {
+      return res.status(413).json({
+        success: false,
+        error: "File size too large",
+        details: error.message,
+      })
+    }
+
+    if (error.message && error.message.includes("Cloudinary")) {
+      return res.status(502).json({
+        success: false,
+        error: "Image upload service temporarily unavailable",
+        details: process.env.NODE_ENV === "development" ? error.message : "Please try again later",
+      })
+    }
+
     res.status(500).json({
       success: false,
       error: "Failed to upload image",
-      details: error.message,
+      details: process.env.NODE_ENV === "development" ? error.message : "Internal server error",
+      stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
     })
   }
 })

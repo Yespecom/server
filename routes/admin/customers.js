@@ -16,9 +16,9 @@ router.get("/", async (req, res) => {
 // Get specific customer profile and their order history
 router.get("/:id", async (req, res) => {
   try {
-    const Customer = require("../../models/tenant/Customer")(req.tenantDB)
-    const Order = require("../../models/tenant/Order")(req.tenantDB)
-    const Product = require("../../models/tenant/Product")(req.tenantDB) // <-- Added: Import Product model
+    const Customer = require("../models/tenant/Customer")(req.tenantDB)
+    const Order = require("../models/tenant/Order")(req.tenantDB)
+    const Product = require("../models/tenant/Product")(req.tenantDB) // <-- Added: Import Product model
 
     const customer = await Customer.findById(req.params.id)
     if (!customer) {

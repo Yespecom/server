@@ -46,7 +46,7 @@ router.get("/test", (req, res) => {
     path: req.path,
     originalUrl: req.originalUrl,
     hasTenantDB: !!req.tenantDB,
-    hasSettingsDoc: !!req.settingsDoc, // Check for settingsDoc instead of SettingsModel
+    hasSettingsDoc: !!req.settingsDoc,
     tenantId: req.tenantId,
     timestamp: new Date().toISOString(),
   }
@@ -62,16 +62,12 @@ router.post("/payment", handlePaymentUpdate)
 async function handlePaymentUpdate(req, res) {
   try {
     console.log("💳 Updating payment settings...")
-    const settings = req.settingsDoc // Use the attached settings document
+    const settings = req.settingsDoc
 
-    // Merge payment settings
     const currentPayment = settings.payment || {}
     const updatedPayment = { ...currentPayment }
 
-    // Update each field from req.body
     Object.keys(req.body).forEach((key) => {
-      // Only update if the value is explicitly provided (not empty string, null, or undefined)
-      // This allows clearing fields by sending empty string if schema allows
       if (req.body[key] !== undefined) {
         updatedPayment[key] = req.body[key]
       }
@@ -81,30 +77,24 @@ async function handlePaymentUpdate(req, res) {
     await settings.save()
     console.log("✅ Payment settings updated.")
 
-    // Prepare safe response (hide sensitive data)
     const safeSettings = {
       ...updatedPayment,
       razorpayKeySecret: updatedPayment.razorpayKeySecret ? "***HIDDEN***" : "",
       stripeSecretKey: updatedPayment.stripeSecretKey ? "***HIDDEN***" : "",
-      phonePeSaltKey: updatedPayment.phonePeSaltKey ? "***HIDDEN***" : "", // Hide PhonePe salt key too
+      phonePeSaltKey: updatedPayment.phonePeSaltKey ? "***HIDDEN***" : "",
     }
-
-    console.log("DEBUG: Before res.json(), res.headersSent:", res.headersSent);
     res.json({
       message: "Payment settings updated successfully",
       settings: safeSettings,
     })
-    console.log("DEBUG: After res.json(), res.headersSent:", res.headersSent);
     return
   } catch (error) {
     console.error("❌ Update payment settings error:", error)
-    console.log("DEBUG: Before res.status().json() in catch, res.headersSent:", res.headersSent);
     if (!res.headersSent) {
       res.status(500).json({
         error: "Failed to update payment settings",
         details: error.message,
       })
-      console.log("DEBUG: After res.status().json() in catch, res.headersSent:", res.headersSent);
       return
     }
   }
@@ -114,10 +104,9 @@ async function handlePaymentUpdate(req, res) {
 router.get("/", async (req, res) => {
   try {
     console.log("📋 Getting all settings...")
-    const settings = req.settingsDoc // Use the attached settings document
+    const settings = req.settingsDoc
     console.log("✅ All settings retrieved")
 
-    // Return safe version without sensitive data
     const safeSettings = {
       general: settings?.general || {},
       social: settings?.social || {},
@@ -126,7 +115,7 @@ router.get("/", async (req, res) => {
         ...(settings?.payment || {}),
         razorpayKeySecret: settings?.payment?.razorpayKeySecret ? "***HIDDEN***" : "",
         stripeSecretKey: settings?.payment?.stripeSecretKey ? "***HIDDEN***" : "",
-        phonePeSaltKey: settings?.payment?.phonePeSaltKey ? "***HIDDEN***" : "", // Hide PhonePe salt key
+        phonePeSaltKey: settings?.payment?.phonePeSaltKey ? "***HIDDEN***" : "",
       },
     }
     res.json(safeSettings)
@@ -145,7 +134,7 @@ router.get("/", async (req, res) => {
 router.get("/general", async (req, res) => {
   try {
     console.log("📋 Getting general settings...")
-    const settings = req.settingsDoc // Use the attached settings document
+    const settings = req.settingsDoc
     console.log("✅ General settings retrieved")
     res.json(settings?.general || {})
     return
@@ -165,7 +154,7 @@ router.post("/general", handleGeneralUpdate)
 async function handleGeneralUpdate(req, res) {
   try {
     console.log("📝 Updating general settings...")
-    const settings = req.settingsDoc // Use the attached settings document
+    const settings = req.settingsDoc
     settings.general = { ...settings.general, ...req.body }
     await settings.save()
     console.log("✅ General settings updated")
@@ -179,20 +168,19 @@ async function handleGeneralUpdate(req, res) {
     })
     return
   }
-})
+}
 
 // Get payment settings
 router.get("/payment", async (req, res) => {
   try {
     console.log("💳 Getting payment settings...")
-    const settings = req.settingsDoc // Use the attached settings document
-    // Don't expose sensitive data like API secrets
+    const settings = req.settingsDoc
     const paymentSettings = settings?.payment || {}
     const safePaymentSettings = {
       ...paymentSettings,
       razorpayKeySecret: paymentSettings.razorpayKeySecret ? "***HIDDEN***" : "",
       stripeSecretKey: paymentSettings.stripeSecretKey ? "***HIDDEN***" : "",
-      phonePeSaltKey: paymentSettings.phonePeSaltKey ? "***HIDDEN***" : "", // Hide PhonePe salt key
+      phonePeSaltKey: paymentSettings.phonePeSaltKey ? "***HIDDEN***" : "",
     }
     console.log("✅ Payment settings retrieved")
     res.json(safePaymentSettings)
@@ -211,7 +199,7 @@ router.get("/payment", async (req, res) => {
 router.get("/social", async (req, res) => {
   try {
     console.log("📱 Getting social settings...")
-    const settings = req.settingsDoc // Use the attached settings document
+    const settings = req.settingsDoc
     console.log("✅ Social settings retrieved")
     res.json(settings?.social || {})
     return
@@ -231,7 +219,7 @@ router.post("/social", handleSocialUpdate)
 async function handleSocialUpdate(req, res) {
   try {
     console.log("📱 Updating social settings...")
-    const settings = req.settingsDoc // Use the attached settings document
+    const settings = req.settingsDoc
     settings.social = { ...settings.social, ...req.body }
     await settings.save()
     console.log("✅ Social settings updated")
@@ -245,13 +233,13 @@ async function handleSocialUpdate(req, res) {
     })
     return
   }
-})
+}
 
 // Get shipping settings
 router.get("/shipping", async (req, res) => {
   try {
     console.log("🚚 Getting shipping settings...")
-    const settings = req.settingsDoc // Use the attached settings document
+    const settings = req.settingsDoc
     console.log("✅ Shipping settings retrieved")
     res.json(settings?.shipping || {})
     return
@@ -271,7 +259,7 @@ router.post("/shipping", handleShippingUpdate)
 async function handleShippingUpdate(req, res) {
   try {
     console.log("🚚 Updating shipping settings...")
-    const settings = req.settingsDoc // Use the attached settings document
+    const settings = req.settingsDoc
     settings.shipping = { ...settings.shipping, ...req.body }
     await settings.save()
     console.log("✅ Shipping settings updated")
@@ -285,7 +273,7 @@ async function handleShippingUpdate(req, res) {
     })
     return
   }
-})
+}
 
 // Debug route to show all settings routes
 router.get("/debug", (req, res) => {

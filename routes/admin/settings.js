@@ -10,94 +10,87 @@ router.use((req, res, next) => {
   next()
 })
 
-// Middleware to ensure Settings model is available
-const ensureSettingsModel = (req, res, next) => {
+// Middleware to ensure settings document is available and initialized
+router.use(async (req, res, next) => {
   try {
     if (!req.tenantDB) {
-      console.error("❌ No tenant database connection available")
+      console.error("❌ No tenant database connection available for settings")
       return res.status(500).json({
         error: "Database connection not available",
-        details: "Tenant database connection is missing",
+        details: "Tenant database connection is missing for settings",
       })
     }
-
-    // Initialize Settings model
     const Settings = require("../../models/tenant/Settings")(req.tenantDB)
-    req.SettingsModel = Settings
-
-    console.log("✅ Settings model initialized successfully")
+    let settings = await Settings.findOne()
+    if (!settings) {
+      console.log("📝 No settings document found, creating a new one.")
+      settings = new Settings({}) // Initialize with default empty settings
+      await settings.save()
+      console.log("✅ New settings document created.")
+    }
+    req.settingsDoc = settings // Attach the settings document to the request
+    console.log("✅ Settings document attached to request.")
     next()
   } catch (error) {
-    console.error("❌ Error initializing Settings model:", error)
-    return res.status(500).json({
-      error: "Failed to initialize settings model",
-      details: error.message,
-    })
+    console.error("❌ Error in ensureSettings middleware:", error)
+    res.status(500).json({ error: "Failed to initialize settings document" })
   }
-}
-
-// Apply the model middleware to all routes
-router.use(ensureSettingsModel)
+})
 
 // Test endpoint
 router.get("/test", (req, res) => {
   console.log("🧪 Admin settings test endpoint reached")
   console.log("🧪 About to send response...")
-
   const response = {
     message: "Admin settings routes are working",
     path: req.path,
     originalUrl: req.originalUrl,
     hasTenantDB: !!req.tenantDB,
-    hasSettingsModel: !!req.SettingsModel,
+    hasSettingsDoc: !!req.settingsDoc, // Check for settingsDoc instead of SettingsModel
     tenantId: req.tenantId,
     timestamp: new Date().toISOString(),
   }
-
   console.log("🧪 Sending response:", response)
   res.json(response)
   console.log("🧪 Response sent successfully")
 })
 
-// FIXED: Support both PUT and POST for payment settings
+// Handle payment settings update (supports PUT and POST)
 router.put("/payment", handlePaymentUpdate)
 router.post("/payment", handlePaymentUpdate)
-
 async function handlePaymentUpdate(req, res) {
   try {
-    const Settings = req.SettingsModel
-
-    let settings = await Settings.findOne()
-    if (!settings) {
-      settings = new Settings({})
-    }
+    console.log("💳 Updating payment settings...")
+    const settings = req.settingsDoc // Use the attached settings document
 
     // Merge payment settings
     const currentPayment = settings.payment || {}
     const updatedPayment = { ...currentPayment }
 
-    // Update each field
+    // Update each field from req.body
     Object.keys(req.body).forEach((key) => {
-      if (req.body[key] !== "" && req.body[key] !== null && req.body[key] !== undefined) {
+      // Only update if the value is explicitly provided (not empty string, null, or undefined)
+      // This allows clearing fields by sending empty string if schema allows
+      if (req.body[key] !== undefined) {
         updatedPayment[key] = req.body[key]
       }
     })
 
     settings.payment = updatedPayment
     await settings.save()
+    console.log("✅ Payment settings updated.")
 
     // Prepare safe response (hide sensitive data)
     const safeSettings = {
       ...updatedPayment,
       razorpayKeySecret: updatedPayment.razorpayKeySecret ? "***HIDDEN***" : "",
       stripeSecretKey: updatedPayment.stripeSecretKey ? "***HIDDEN***" : "",
+      phonePeSaltKey: updatedPayment.phonePeSaltKey ? "***HIDDEN***" : "", // Hide PhonePe salt key too
     }
-
     res.json({
       message: "Payment settings updated successfully",
       settings: safeSettings,
     })
-    return
   } catch (error) {
     console.error("❌ Update payment settings error:", error)
     if (!res.headersSent) {
@@ -106,7 +99,6 @@ async function handlePaymentUpdate(req, res) {
         details: error.message,
       })
     }
-    return
   }
 }
 
@@ -114,8 +106,7 @@ async function handlePaymentUpdate(req, res) {
 router.get("/", async (req, res) => {
   try {
     console.log("📋 Getting all settings...")
-    const Settings = req.SettingsModel
-    const settings = await Settings.findOne()
+    const settings = req.settingsDoc // Use the attached settings document
     console.log("✅ All settings retrieved")
 
     // Return safe version without sensitive data
@@ -127,18 +118,16 @@ router.get("/", async (req, res) => {
         ...(settings?.payment || {}),
         razorpayKeySecret: settings?.payment?.razorpayKeySecret ? "***HIDDEN***" : "",
         stripeSecretKey: settings?.payment?.stripeSecretKey ? "***HIDDEN***" : "",
+        phonePeSaltKey: settings?.payment?.phonePeSaltKey ? "***HIDDEN***" : "", // Hide PhonePe salt key
       },
     }
-
     res.json(safeSettings)
-    return
   } catch (error) {
     console.error("❌ Get all settings error:", error)
     res.status(500).json({
       error: "Failed to get settings",
       details: error.message,
     })
-    return
   }
 })
 
@@ -146,48 +135,35 @@ router.get("/", async (req, res) => {
 router.get("/general", async (req, res) => {
   try {
     console.log("📋 Getting general settings...")
-    const Settings = req.SettingsModel
-    const settings = await Settings.findOne()
+    const settings = req.settingsDoc // Use the attached settings document
     console.log("✅ General settings retrieved")
     res.json(settings?.general || {})
-    return
   } catch (error) {
     console.error("❌ Get general settings error:", error)
     res.status(500).json({
       error: "Failed to get general settings",
       details: error.message,
     })
-    return
   }
 })
 
-// Update general settings - Support both PUT and POST
+// Update general settings (supports PUT and POST)
 router.put("/general", handleGeneralUpdate)
 router.post("/general", handleGeneralUpdate)
-
 async function handleGeneralUpdate(req, res) {
   try {
     console.log("📝 Updating general settings...")
-    const Settings = req.SettingsModel
-
-    let settings = await Settings.findOne()
-    if (!settings) {
-      settings = new Settings({})
-    }
-
+    const settings = req.settingsDoc // Use the attached settings document
     settings.general = { ...settings.general, ...req.body }
     await settings.save()
-
     console.log("✅ General settings updated")
     res.json(settings.general)
-    return
   } catch (error) {
     console.error("❌ Update general settings error:", error)
     res.status(500).json({
       error: "Failed to update general settings",
       details: error.message,
     })
-    return
   }
 }
 
@@ -195,27 +171,23 @@ async function handleGeneralUpdate(req, res) {
 router.get("/payment", async (req, res) => {
   try {
     console.log("💳 Getting payment settings...")
-    const Settings = req.SettingsModel
-    const settings = await Settings.findOne()
-
+    const settings = req.settingsDoc // Use the attached settings document
     // Don't expose sensitive data like API secrets
     const paymentSettings = settings?.payment || {}
     const safePaymentSettings = {
       ...paymentSettings,
       razorpayKeySecret: paymentSettings.razorpayKeySecret ? "***HIDDEN***" : "",
       stripeSecretKey: paymentSettings.stripeSecretKey ? "***HIDDEN***" : "",
+      phonePeSaltKey: paymentSettings.phonePeSaltKey ? "***HIDDEN***" : "", // Hide PhonePe salt key
     }
-
     console.log("✅ Payment settings retrieved")
     res.json(safePaymentSettings)
-    return
   } catch (error) {
     console.error("❌ Get payment settings error:", error)
     res.status(500).json({
       error: "Failed to get payment settings",
       details: error.message,
     })
-    return
   }
 })
 
@@ -223,48 +195,35 @@ router.get("/payment", async (req, res) => {
 router.get("/social", async (req, res) => {
   try {
     console.log("📱 Getting social settings...")
-    const Settings = req.SettingsModel
-    const settings = await Settings.findOne()
+    const settings = req.settingsDoc // Use the attached settings document
     console.log("✅ Social settings retrieved")
     res.json(settings?.social || {})
-    return
   } catch (error) {
     console.error("❌ Get social settings error:", error)
     res.status(500).json({
       error: "Failed to get social settings",
       details: error.message,
     })
-    return
   }
 })
 
-// Update social settings - Support both PUT and POST
+// Update social settings (supports PUT and POST)
 router.put("/social", handleSocialUpdate)
 router.post("/social", handleSocialUpdate)
-
 async function handleSocialUpdate(req, res) {
   try {
     console.log("📱 Updating social settings...")
-    const Settings = req.SettingsModel
-
-    let settings = await Settings.findOne()
-    if (!settings) {
-      settings = new Settings({})
-    }
-
+    const settings = req.settingsDoc // Use the attached settings document
     settings.social = { ...settings.social, ...req.body }
     await settings.save()
-
     console.log("✅ Social settings updated")
     res.json(settings.social)
-    return
   } catch (error) {
     console.error("❌ Update social settings error:", error)
     res.status(500).json({
       error: "Failed to update social settings",
       details: error.message,
     })
-    return
   }
 }
 
@@ -272,48 +231,35 @@ async function handleSocialUpdate(req, res) {
 router.get("/shipping", async (req, res) => {
   try {
     console.log("🚚 Getting shipping settings...")
-    const Settings = req.SettingsModel
-    const settings = await Settings.findOne()
+    const settings = req.settingsDoc // Use the attached settings document
     console.log("✅ Shipping settings retrieved")
     res.json(settings?.shipping || {})
-    return
   } catch (error) {
     console.error("❌ Get shipping settings error:", error)
     res.status(500).json({
       error: "Failed to get shipping settings",
       details: error.message,
     })
-    return
   }
 })
 
-// Update shipping settings - Support both PUT and POST
+// Update shipping settings (supports PUT and POST)
 router.put("/shipping", handleShippingUpdate)
 router.post("/shipping", handleShippingUpdate)
-
 async function handleShippingUpdate(req, res) {
   try {
     console.log("🚚 Updating shipping settings...")
-    const Settings = req.SettingsModel
-
-    let settings = await Settings.findOne()
-    if (!settings) {
-      settings = new Settings({})
-    }
-
+    const settings = req.settingsDoc // Use the attached settings document
     settings.shipping = { ...settings.shipping, ...req.body }
     await settings.save()
-
     console.log("✅ Shipping settings updated")
     res.json(settings.shipping)
-    return
   } catch (error) {
     console.error("❌ Update shipping settings error:", error)
     res.status(500).json({
       error: "Failed to update shipping settings",
       details: error.message,
     })
-    return
   }
 }
 
@@ -344,7 +290,6 @@ router.get("/debug", (req, res) => {
     method: req.method,
     timestamp: new Date().toISOString(),
   })
-  return
 })
 
 module.exports = router

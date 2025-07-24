@@ -99,74 +99,72 @@ router.get("/test", (req, res) => {
 // Create new order
 router.post("/", authenticateCustomer, async (req, res) => {
   try {
-    const { items, shippingAddress, paymentMethod, notes, couponCode } = req.body
-    const customer = req.customer
+    const { items, shippingAddress, paymentMethod, notes, couponCode } = req.body;
+    const customer = req.customer;
 
-    console.log(`📦 Creating order for customer: ${customer.email}`)
+    console.log(`📦 Creating order for customer: ${customer.email}`);
 
-    // Validation
+    // Step 1: Validate items
     if (!items || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({
         error: "Order items are required",
         code: "MISSING_ITEMS",
-      })
+      });
     }
 
+    // Step 2: Validate shipping address
     if (!shippingAddress) {
       return res.status(400).json({
         error: "Shipping address is required",
         code: "MISSING_ADDRESS",
-      })
+      });
     }
 
-    // Validate shipping address
-    const requiredAddressFields = ["name", "street", "city", "state", "zipCode"]
-    const missingFields = requiredAddressFields.filter((field) => !shippingAddress[field])
+    const requiredFields = ["name", "street", "city", "state", "zipCode"];
+    const missingFields = requiredFields.filter(f => !shippingAddress[f]);
 
     if (missingFields.length > 0) {
       return res.status(400).json({
         error: "Incomplete shipping address",
         missingFields,
         code: "INCOMPLETE_ADDRESS",
-      })
+      });
     }
 
-    // Get models
-    const Order = require("../../models/tenant/Order")(req.tenantDB)
-    const Product = require("../../models/tenant/Product")(req.tenantDB)
-    const Settings = require("../../models/tenant/Settings")(req.tenantDB)
-    const Offer = require("../../models/tenant/Offer")(req.tenantDB)
+    // Step 3: Get Models
+    const Order = require("../../models/tenant/Order")(req.tenantDB);
+    const Product = require("../../models/tenant/Product")(req.tenantDB);
 
-    // Validate products and calculate totals
-    let subtotal = 0
-    const orderItems = []
+    // Step 4: Validate products and compute totals
+    let subtotal = 0;
+    const orderItems = [];
 
     for (const item of items) {
       if (!item.productId || !item.quantity || item.quantity <= 0) {
         return res.status(400).json({
           error: "Each item must have a valid productId and quantity",
           code: "INVALID_ITEM_DATA",
-        })
+        });
       }
 
-      const product = await Product.findById(item.productId)
+      const product = await Product.findById(item.productId);
       if (!product || !product.isActive) {
         return res.status(400).json({
           error: `Product not found or inactive: ${item.productId}`,
           code: "INVALID_PRODUCT",
-        })
+        });
       }
 
       if (!product.isAvailable(item.quantity)) {
         return res.status(400).json({
-          error: `Product not available in requested quantity: ${product.name}`,
+          error: `Insufficient stock for: ${product.name}`,
           code: "INSUFFICIENT_STOCK",
           availableQuantity: product.inventory?.trackQuantity ? product.inventory.quantity : "unlimited",
-        })
+        });
       }
 
-      const itemTotal = product.price * item.quantity
-      subtotal += itemTotal
+      const itemTotal = product.price * item.quantity;
+      subtotal += itemTotal;
 
       orderItems.push({
         productId: product._id,
@@ -174,130 +172,51 @@ router.post("/", authenticateCustomer, async (req, res) => {
         price: product.price,
         quantity: item.quantity,
         total: itemTotal,
-      })
+      });
     }
 
-    // Get settings for tax and shipping calculation
-    const settings = await Settings.findOne()
-
-    // Apply coupon/offer if provided
-    let discount = 0
-    let appliedOffer = null
-
-    if (couponCode) {
-      const offer = await Offer.findOne({
-        code: couponCode.toUpperCase(),
-        isActive: true,
-        isPublic: true,
-        startDate: { $lte: new Date() },
-        endDate: { $gte: new Date() },
-      })
-
-      if (offer) {
-        const offerResult = offer.applyOffer(
-          subtotal,
-          orderItems.map((item) => item.productId),
-        )
-        if (offerResult.success) {
-          discount = offerResult.discount
-          appliedOffer = {
-            id: offer._id,
-            code: offer.code,
-            title: offer.title,
-            type: offer.type,
-            discount: discount,
-          }
-
-          // Update offer usage
-          offer.usedCount += 1
-          await offer.save()
-        }
-      }
-    }
-
-    // Calculate tax
-    let tax = 0
-    if (settings?.tax?.enabled) {
-      const taxableAmount = subtotal - discount
-      tax = settings.tax.inclusive ? 0 : (taxableAmount * settings.tax.rate) / 100
-    }
-
-    // Calculate shipping
-    let shipping = 0
-    const finalSubtotal = subtotal - discount
-    if (settings?.shipping?.freeShippingEnabled && finalSubtotal >= settings.shipping.freeShippingAbove) {
-      shipping = 0
-    } else {
-      shipping = settings?.shipping?.charges || 50
-    }
-
-    const total = subtotal - discount + tax + shipping
-
-    // Create order
-    const order = new Order({
+    // Step 5: Create Order
+    const newOrder = new Order({
       customerId: customer._id,
       customerInfo: {
-        name: customer.name,
+        name: shippingAddress.name,
         email: customer.email,
         phone: customer.phone,
-        address: shippingAddress,
+        address: {
+          street: shippingAddress.street,
+          city: shippingAddress.city,
+          state: shippingAddress.state,
+          zipCode: shippingAddress.zipCode,
+          country: shippingAddress.country || "India",
+        },
       },
       items: orderItems,
       subtotal,
-      tax,
-      shipping,
-      discount,
-      total,
+      tax: 0,
+      shipping: 0,
+      discount: 0,
+      total: subtotal,
       paymentMethod: paymentMethod || "cod",
-      notes: notes || "",
-      appliedOffer,
-    })
+      notes,
+    });
 
-    await order.save()
+    await newOrder.save(); // auto-generates orderNumber in pre("save") hook
 
-    // Update product stock and sales count
-    for (const item of orderItems) {
-      const product = await Product.findById(item.productId)
-      if (product) {
-        product.updateStock(item.quantity, "subtract")
-        product.salesCount += item.quantity
-        await product.save()
-      }
-    }
-
-    // Update customer stats
-    await customer.updateStats(total)
-
-    console.log(`✅ Order created: ${order.orderNumber}`)
-
-    res.status(201).json({
+    return res.status(201).json({
       message: "Order created successfully",
-      order: {
-        id: order._id,
-        orderNumber: order.orderNumber,
-        items: order.items,
-        subtotal: order.subtotal,
-        tax: order.tax,
-        shipping: order.shipping,
-        discount: order.discount,
-        total: order.total,
-        status: order.status,
-        paymentStatus: order.paymentStatus,
-        paymentMethod: order.paymentMethod,
-        appliedOffer: order.appliedOffer,
-        createdAt: order.createdAt,
-        estimatedDelivery: order.estimatedDelivery,
-      },
-    })
+      order: newOrder,
+    });
+
   } catch (error) {
-    console.error("❌ Create order error:", error)
-    res.status(500).json({
+    console.error("❌ Create order error:", error);
+    return res.status(500).json({
       error: "Failed to create order",
       details: error.message,
       code: "ORDER_CREATION_ERROR",
-    })
+    });
   }
-})
+});
+
 
 // Get customer orders
 router.get("/", authenticateCustomer, async (req, res) => {

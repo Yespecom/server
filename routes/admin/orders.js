@@ -4,23 +4,28 @@ const router = express.Router()
 // Get all orders
 router.get("/", async (req, res) => {
   try {
-    // Add a log here to check req.tenantDB
     console.log("Attempting to access req.tenantDB:", req.tenantDB ? "Available" : "Not Available")
 
+    // Ensure the Product model is also loaded and registered with the tenant DB
+    // This is crucial for Mongoose to find the 'Product' schema during population
+    const Product = require("../../models/tenant/Product")(req.tenantDB) // Assuming this path and structure
     const Order = require("../../models/tenant/Order")(req.tenantDB)
+
     const orders = await Order.find().populate("items.productId").sort({ createdAt: -1 })
     res.json(orders)
   } catch (error) {
-    // Log the full error for server-side debugging
     console.error("Error fetching orders:", error)
-    res.status(500).json({ error: error.message, stack: error.stack }) // Include stack for more details
+    res.status(500).json({ error: error.message, stack: error.stack })
   }
 })
 
 // Get specific order
 router.get("/:id", async (req, res) => {
   try {
+    // Ensure the Product model is also loaded and registered with the tenant DB
+    const Product = require("../../models/tenant/Product")(req.tenantDB) // Assuming this path and structure
     const Order = require("../../models/tenant/Order")(req.tenantDB)
+
     const order = await Order.findById(req.params.id).populate("items.productId")
     if (!order) {
       return res.status(404).json({ error: "Order not found" })
@@ -35,9 +40,11 @@ router.get("/:id", async (req, res) => {
 // Update order status
 router.put("/:id", async (req, res) => {
   try {
+    // Ensure the Product model is also loaded and registered with the tenant DB
+    const Product = require("../../models/tenant/Product")(req.tenantDB) // Assuming this path and structure
     const Order = require("../../models/tenant/Order")(req.tenantDB)
+
     const { status } = req.body
-    // Validate status
     const validStatuses = ["pending", "confirmed", "processing", "shipped", "delivered", "cancelled"]
     if (!validStatuses.includes(status)) {
       return res.status(400).json({

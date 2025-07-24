@@ -3,11 +3,11 @@ module.exports = (tenantDB) => {
 
   const orderSchema = new mongoose.Schema(
     {
-      orderNumber: {
-        type: String,
-        required: true,
-        unique: true,
-      },
+     orderNumber: {
+  type: String,
+  unique: true,      // ✅ keep this
+  required: false     // ✅ change this
+}
       customerId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: "Customer",

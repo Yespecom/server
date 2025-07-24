@@ -62,7 +62,11 @@ router.post("/payment", handlePaymentUpdate)
 async function handlePaymentUpdate(req, res) {
   try {
     console.log("💳 Updating payment settings...")
+    console.log("DEBUG: Incoming request body for payment:", req.body) // Log incoming data
+
     const settings = req.settingsDoc
+
+    console.log("DEBUG: Current settings.payment BEFORE update:", settings.payment) // Log current state
 
     const currentPayment = settings.payment || {}
     const updatedPayment = { ...currentPayment }
@@ -74,8 +78,10 @@ async function handlePaymentUpdate(req, res) {
     })
 
     settings.payment = updatedPayment
+    console.log("DEBUG: settings.payment AFTER merge, BEFORE save:", settings.payment) // Log merged state
+
     await settings.save()
-    console.log("✅ Payment settings updated.")
+    console.log("✅ Payment settings updated and saved to DB.")
 
     const safeSettings = {
       ...updatedPayment,
@@ -90,6 +96,8 @@ async function handlePaymentUpdate(req, res) {
     return
   } catch (error) {
     console.error("❌ Update payment settings error:", error)
+    // Log the full error object, including stack for more details
+    console.error("❌ Error details:", error.message, error.stack)
     if (!res.headersSent) {
       res.status(500).json({
         error: "Failed to update payment settings",

@@ -53,6 +53,7 @@ router.get("/test", (req, res) => {
   console.log("🧪 Sending response:", response)
   res.json(response)
   console.log("🧪 Response sent successfully")
+  return
 })
 
 // Handle payment settings update (supports PUT and POST)
@@ -91,6 +92,7 @@ async function handlePaymentUpdate(req, res) {
       message: "Payment settings updated successfully",
       settings: safeSettings,
     })
+    return
   } catch (error) {
     console.error("❌ Update payment settings error:", error)
     if (!res.headersSent) {
@@ -98,6 +100,7 @@ async function handlePaymentUpdate(req, res) {
         error: "Failed to update payment settings",
         details: error.message,
       })
+      return
     }
   }
 }
@@ -122,12 +125,14 @@ router.get("/", async (req, res) => {
       },
     }
     res.json(safeSettings)
+    return
   } catch (error) {
     console.error("❌ Get all settings error:", error)
     res.status(500).json({
       error: "Failed to get settings",
       details: error.message,
     })
+    return
   }
 })
 
@@ -138,12 +143,14 @@ router.get("/general", async (req, res) => {
     const settings = req.settingsDoc // Use the attached settings document
     console.log("✅ General settings retrieved")
     res.json(settings?.general || {})
+    return
   } catch (error) {
     console.error("❌ Get general settings error:", error)
     res.status(500).json({
       error: "Failed to get general settings",
       details: error.message,
     })
+    return
   }
 })
 
@@ -158,12 +165,14 @@ async function handleGeneralUpdate(req, res) {
     await settings.save()
     console.log("✅ General settings updated")
     res.json(settings.general)
+    return
   } catch (error) {
     console.error("❌ Update general settings error:", error)
     res.status(500).json({
       error: "Failed to update general settings",
       details: error.message,
     })
+    return
   }
 }
 
@@ -182,12 +191,14 @@ router.get("/payment", async (req, res) => {
     }
     console.log("✅ Payment settings retrieved")
     res.json(safePaymentSettings)
+    return
   } catch (error) {
     console.error("❌ Get payment settings error:", error)
     res.status(500).json({
       error: "Failed to get payment settings",
       details: error.message,
     })
+    return
   }
 })
 
@@ -198,12 +209,14 @@ router.get("/social", async (req, res) => {
     const settings = req.settingsDoc // Use the attached settings document
     console.log("✅ Social settings retrieved")
     res.json(settings?.social || {})
+    return
   } catch (error) {
     console.error("❌ Get social settings error:", error)
     res.status(500).json({
       error: "Failed to get social settings",
       details: error.message,
     })
+    return
   }
 })
 
@@ -218,12 +231,14 @@ async function handleSocialUpdate(req, res) {
     await settings.save()
     console.log("✅ Social settings updated")
     res.json(settings.social)
+    return
   } catch (error) {
     console.error("❌ Update social settings error:", error)
     res.status(500).json({
       error: "Failed to update social settings",
       details: error.message,
     })
+    return
   }
 }
 
@@ -234,12 +249,14 @@ router.get("/shipping", async (req, res) => {
     const settings = req.settingsDoc // Use the attached settings document
     console.log("✅ Shipping settings retrieved")
     res.json(settings?.shipping || {})
+    return
   } catch (error) {
     console.error("❌ Get shipping settings error:", error)
     res.status(500).json({
       error: "Failed to get shipping settings",
       details: error.message,
     })
+    return
   }
 })
 
@@ -254,12 +271,14 @@ async function handleShippingUpdate(req, res) {
     await settings.save()
     console.log("✅ Shipping settings updated")
     res.json(settings.shipping)
+    return
   } catch (error) {
     console.error("❌ Update shipping settings error:", error)
     res.status(500).json({
       error: "Failed to update shipping settings",
       details: error.message,
     })
+    return
   }
 }
 
@@ -290,6 +309,7 @@ router.get("/debug", (req, res) => {
     method: req.method,
     timestamp: new Date().toISOString(),
   })
+  return
 })
 
 module.exports = router

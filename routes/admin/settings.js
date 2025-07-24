@@ -88,18 +88,23 @@ async function handlePaymentUpdate(req, res) {
       stripeSecretKey: updatedPayment.stripeSecretKey ? "***HIDDEN***" : "",
       phonePeSaltKey: updatedPayment.phonePeSaltKey ? "***HIDDEN***" : "", // Hide PhonePe salt key too
     }
+
+    console.log("DEBUG: Before res.json(), res.headersSent:", res.headersSent);
     res.json({
       message: "Payment settings updated successfully",
       settings: safeSettings,
     })
+    console.log("DEBUG: After res.json(), res.headersSent:", res.headersSent);
     return
   } catch (error) {
     console.error("❌ Update payment settings error:", error)
+    console.log("DEBUG: Before res.status().json() in catch, res.headersSent:", res.headersSent);
     if (!res.headersSent) {
       res.status(500).json({
         error: "Failed to update payment settings",
         details: error.message,
       })
+      console.log("DEBUG: After res.status().json() in catch, res.headersSent:", res.headersSent);
       return
     }
   }
@@ -174,7 +179,7 @@ async function handleGeneralUpdate(req, res) {
     })
     return
   }
-}
+})
 
 // Get payment settings
 router.get("/payment", async (req, res) => {
@@ -240,7 +245,7 @@ async function handleSocialUpdate(req, res) {
     })
     return
   }
-}
+})
 
 // Get shipping settings
 router.get("/shipping", async (req, res) => {
@@ -280,7 +285,7 @@ async function handleShippingUpdate(req, res) {
     })
     return
   }
-}
+})
 
 // Debug route to show all settings routes
 router.get("/debug", (req, res) => {

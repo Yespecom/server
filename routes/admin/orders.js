@@ -8,7 +8,7 @@ router.get("/", async (req, res) => {
     console.log("Attempting to access req.tenantDB:", req.tenantDB ? "Available" : "Not Available")
 
     const Order = require("../../models/tenant/Order")(req.tenantDB)
-    const orders = await Order.find().populate("items.product").sort({ createdAt: -1 })
+    const orders = await Order.find().populate("items.productId").sort({ createdAt: -1 })
     res.json(orders)
   } catch (error) {
     // Log the full error for server-side debugging
@@ -21,7 +21,7 @@ router.get("/", async (req, res) => {
 router.get("/:id", async (req, res) => {
   try {
     const Order = require("../../models/tenant/Order")(req.tenantDB)
-    const order = await Order.findById(req.params.id).populate("items.product")
+    const order = await Order.findById(req.params.id).populate("items.productId")
     if (!order) {
       return res.status(404).json({ error: "Order not found" })
     }
@@ -45,7 +45,7 @@ router.put("/:id", async (req, res) => {
         validStatuses,
       })
     }
-    const order = await Order.findByIdAndUpdate(req.params.id, { status }, { new: true }).populate("items.product")
+    const order = await Order.findByIdAndUpdate(req.params.id, { status }, { new: true }).populate("items.productId")
     if (!order) {
       return res.status(404).json({ error: "Order not found" })
     }

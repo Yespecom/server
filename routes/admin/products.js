@@ -58,7 +58,7 @@ const parseOfferField = (offer) => {
   return null
 }
 
-// MODIFIED: Enhanced variant parsing with optional stock handling
+// FIXED: Enhanced variant parsing with proper trackQuantity handling
 const parseVariants = (variants, hasVariants, trackQuantity) => {
   console.log("🔍 Parsing variants:", variants, "hasVariants:", hasVariants, "trackQuantity:", trackQuantity)
 
@@ -92,11 +92,19 @@ const parseVariants = (variants, hasVariants, trackQuantity) => {
 
       // Validate required fields (stock is optional if not tracking quantity)
       const requiredFields = ["name", "price", "sku"]
-      if (trackQuantity) {
+
+      // Only require stock if trackQuantity is true
+      if (trackQuantity === true || trackQuantity === "true") {
         requiredFields.push("stock")
       }
 
-      const missingFields = requiredFields.filter((field) => !variant[field])
+      const missingFields = requiredFields.filter((field) => {
+        if (field === "stock" && (trackQuantity === false || trackQuantity === "false")) {
+          return false // Don't require stock if tracking is disabled
+        }
+        return !variant[field] && variant[field] !== "0"
+      })
+
       if (missingFields.length > 0) {
         console.error(`❌ Variant ${index + 1} missing required fields:`, missingFields)
         throw new Error(`Variant ${index + 1} is missing required fields: ${missingFields.join(", ")}`)
@@ -125,17 +133,20 @@ const parseVariants = (variants, hasVariants, trackQuantity) => {
         image: variant.image || "",
       }
 
-      // MODIFIED: Only include stock if quantity tracking is enabled
-      if (trackQuantity) {
-        if (!variant.stock && variant.stock !== "0") {
-          throw new Error(`Variant "${variant.name}" is missing stock quantity`)
+      // FIXED: Only include stock if quantity tracking is enabled
+      if (trackQuantity === true || trackQuantity === "true") {
+        if (variant.stock === undefined || variant.stock === null || variant.stock === "") {
+          // Set default stock to 0 if tracking is enabled but no stock provided
+          processedVariant.stock = "0"
+        } else {
+          const stock = Number.parseInt(variant.stock)
+          if (isNaN(stock) || stock < 0) {
+            throw new Error(`Variant "${variant.name}" has invalid stock: ${variant.stock}`)
+          }
+          processedVariant.stock = stock.toString()
         }
-        const stock = Number.parseInt(variant.stock)
-        if (isNaN(stock) || stock < 0) {
-          throw new Error(`Variant "${variant.name}" has invalid stock: ${variant.stock}`)
-        }
-        processedVariant.stock = stock.toString()
       }
+      // If trackQuantity is false, don't include stock field at all
 
       // Only include _id if it's a valid ObjectId (not temp ID)
       if (
@@ -329,11 +340,11 @@ router.get("/:id", async (req, res) => {
   }
 })
 
-// MODIFIED: Create product with optional quantity tracking
+// FIXED: Create product with proper trackQuantity handling
 router.post("/", fileUpload.array("images", 10), async (req, res) => {
   try {
     console.log("📝 Creating new product...")
-    console.log("📋 Request body:", req.body)
+    console.log("📋 Request body keys:", Object.keys(req.body))
     console.log("📋 Files:", req.files?.length || 0)
 
     const { Product } = ensureModelsLoaded(req.tenantDB)
@@ -362,8 +373,9 @@ router.post("/", fileUpload.array("images", 10), async (req, res) => {
       trackQuantity, // NEW: Quantity tracking toggle
     } = req.body
 
-    // Parse trackQuantity
-    const shouldTrackQuantity = trackQuantity === "true" || trackQuantity === true
+    // FIXED: Parse trackQuantity with proper boolean conversion
+    const shouldTrackQuantity = trackQuantity === "true" || trackQuantity === true || trackQuantity === 1
+    console.log("🔍 Track quantity parsed:", shouldTrackQuantity, "from:", trackQuantity, typeof trackQuantity)
 
     // Validate required fields
     if (!name || !name.trim()) {
@@ -414,7 +426,7 @@ router.post("/", fileUpload.array("images", 10), async (req, res) => {
 
     try {
       parsedVariants = parseVariants(variants, isVariantProduct, shouldTrackQuantity)
-      console.log("🔄 Parsed variants:", parsedVariants)
+      console.log("🔄 Parsed variants:", parsedVariants.length)
     } catch (variantError) {
       console.error("❌ Variant parsing error:", variantError)
       return res.status(400).json({
@@ -452,7 +464,7 @@ router.post("/", fileUpload.array("images", 10), async (req, res) => {
       }
     }
 
-    // MODIFIED: Validate non-variant product fields (stock only if tracking quantity)
+    // FIXED: Validate non-variant product fields (stock only if tracking quantity)
     if (!isVariantProduct) {
       if (!price || Number.parseFloat(price) <= 0) {
         return res.status(400).json({
@@ -461,11 +473,17 @@ router.post("/", fileUpload.array("images", 10), async (req, res) => {
         })
       }
 
-      if (shouldTrackQuantity && (!stock || Number.parseInt(stock) < 0)) {
-        return res.status(400).json({
-          success: false,
-          error: "Stock quantity cannot be negative when quantity tracking is enabled",
-        })
+      if (shouldTrackQuantity) {
+        // Only validate stock if tracking is enabled
+        if (stock === undefined || stock === null || stock === "") {
+          // Set default stock to 0 if tracking is enabled but no stock provided
+          console.log("⚠️ No stock provided, setting default to 0")
+        } else if (Number.parseInt(stock) < 0) {
+          return res.status(400).json({
+            success: false,
+            error: "Stock quantity cannot be negative when quantity tracking is enabled",
+          })
+        }
       }
     }
 
@@ -499,7 +517,7 @@ router.post("/", fileUpload.array("images", 10), async (req, res) => {
     // Generate slug
     const slug = generateSlug(name)
 
-    // MODIFIED: Create product data with optional stock fields
+    // FIXED: Create product data with proper trackQuantity handling
     const productData = {
       name: name.trim(),
       slug,
@@ -526,15 +544,22 @@ router.post("/", fileUpload.array("images", 10), async (req, res) => {
       isActive: true,
     }
 
-    // Only set stock if tracking quantity
+    // FIXED: Only set stock if tracking quantity
     if (shouldTrackQuantity) {
-      productData.stock = isVariantProduct ? 0 : Number.parseInt(stock) || 0
+      if (isVariantProduct) {
+        productData.stock = 0 // Variants handle their own stock
+      } else {
+        productData.stock = stock !== undefined && stock !== null && stock !== "" ? Number.parseInt(stock) : 0 // Default to 0 if tracking but no stock provided
+      }
     }
+    // If not tracking quantity, don't set stock field at all
 
     console.log("📋 Final product data:", {
       ...productData,
       variants: productData.variants.length > 0 ? `${productData.variants.length} variants` : "no variants",
       trackQuantity: productData.trackQuantity,
+      hasStock: "stock" in productData,
+      stockValue: productData.stock,
     })
 
     // Create and save product
@@ -567,6 +592,7 @@ router.post("/", fileUpload.array("images", 10), async (req, res) => {
         message: error.errors[key].message,
         value: error.errors[key].value,
       }))
+      console.error("❌ Validation errors:", errors)
       return res.status(400).json({
         success: false,
         error: "Validation failed",
@@ -590,11 +616,11 @@ router.post("/", fileUpload.array("images", 10), async (req, res) => {
   }
 })
 
-// MODIFIED: Update product with optional quantity tracking
+// FIXED: Update product with proper trackQuantity handling
 router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
   try {
     console.log("📝 Updating product:", req.params.id)
-    console.log("📋 Request body:", req.body)
+    console.log("📋 Request body keys:", Object.keys(req.body))
 
     const { Product } = ensureModelsLoaded(req.tenantDB)
 
@@ -605,6 +631,8 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
         error: "Product not found",
       })
     }
+
+    console.log("📋 Current product trackQuantity:", product.trackQuantity)
 
     const {
       name,
@@ -630,8 +658,16 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
       trackQuantity, // NEW: Quantity tracking toggle
     } = req.body
 
-    // Parse trackQuantity
-    const shouldTrackQuantity = trackQuantity === "true" || trackQuantity === true
+    // FIXED: Parse trackQuantity with proper boolean conversion and fallback
+    let shouldTrackQuantity
+    if (trackQuantity !== undefined) {
+      shouldTrackQuantity = trackQuantity === "true" || trackQuantity === true || trackQuantity === 1
+    } else {
+      // If trackQuantity is not provided, use existing value or default to true
+      shouldTrackQuantity = product.trackQuantity !== undefined ? product.trackQuantity : true
+    }
+
+    console.log("🔍 Track quantity parsed:", shouldTrackQuantity, "from:", trackQuantity, typeof trackQuantity)
 
     // Handle image updates
     let gallery = parseExistingImages(existingImages)
@@ -658,7 +694,7 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
 
     try {
       parsedVariants = parseVariants(variants, isVariantProduct, shouldTrackQuantity)
-      console.log("🔄 Updated variants:", parsedVariants)
+      console.log("🔄 Updated variants:", parsedVariants.length)
     } catch (variantError) {
       console.error("❌ Variant parsing error:", variantError)
       return res.status(400).json({
@@ -707,7 +743,7 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
     // Generate slug if name changed
     const slug = name !== product.name ? generateSlug(name) : product.slug
 
-    // MODIFIED: Update product fields with optional stock
+    // FIXED: Update product fields with proper trackQuantity handling
     const updateData = {
       name: name?.trim() || product.name,
       slug,
@@ -733,17 +769,31 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
       trackQuantity: shouldTrackQuantity, // NEW: Update quantity tracking
     }
 
-    // Only set stock if tracking quantity
+    // FIXED: Handle stock field based on trackQuantity
     if (shouldTrackQuantity) {
-      updateData.stock = isVariantProduct ? 0 : Number.parseInt(stock) || product.stock || 0
+      if (isVariantProduct) {
+        updateData.stock = 0 // Variants handle their own stock
+      } else {
+        // For non-variant products with quantity tracking
+        if (stock !== undefined && stock !== null && stock !== "") {
+          updateData.stock = Number.parseInt(stock)
+        } else {
+          // Keep existing stock or default to 0
+          updateData.stock = product.stock !== undefined ? product.stock : 0
+        }
+      }
     } else {
-      updateData.stock = undefined // Remove stock field if not tracking
+      // If quantity tracking is disabled, remove stock field
+      updateData.$unset = { stock: 1 }
     }
 
     console.log("📋 Update data:", {
       ...updateData,
       variants: updateData.variants.length > 0 ? `${updateData.variants.length} variants` : "no variants",
       trackQuantity: updateData.trackQuantity,
+      hasStock: "stock" in updateData,
+      stockValue: updateData.stock,
+      hasUnset: "$unset" in updateData,
     })
 
     const updatedProduct = await Product.findByIdAndUpdate(req.params.id, updateData, {
@@ -777,6 +827,7 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
         message: error.errors[key].message,
         value: error.errors[key].value,
       }))
+      console.error("❌ Validation errors:", errors)
       return res.status(400).json({
         success: false,
         error: "Validation failed",
@@ -800,7 +851,7 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
   }
 })
 
-// Delete product (unchanged)
+// Delete product
 router.delete("/:id", async (req, res) => {
   try {
     console.log("🗑️ Deleting product:", req.params.id)
@@ -847,7 +898,7 @@ router.delete("/:id", async (req, res) => {
   }
 })
 
-// Upload single image endpoint (unchanged)
+// Upload single image endpoint
 router.post("/upload-image", fileUpload.single("image"), async (req, res) => {
   try {
     console.log("📸 Upload image endpoint hit")
@@ -920,7 +971,7 @@ router.post("/upload-image", fileUpload.single("image"), async (req, res) => {
   }
 })
 
-// Delete single image endpoint (unchanged)
+// Delete single image endpoint
 router.delete("/delete-image", async (req, res) => {
   try {
     const { imageUrl } = req.body

@@ -120,7 +120,6 @@ const parseVariants = (variants, hasVariants) => {
 
       // Create processed variant object
       const processedVariant = {
-        _id: variant._id || undefined, // Keep existing ID if updating
         name: variant.name.trim(),
         options: Array.isArray(variant.options) ? variant.options : [variant.name.trim()],
         price: price.toString(), // Keep as string to match schema
@@ -130,6 +129,16 @@ const parseVariants = (variants, hasVariants) => {
         isActive: variant.isActive !== undefined ? Boolean(variant.isActive) : true,
         image: variant.image || "",
       }
+
+      // CRITICAL FIX: Only include _id if it's a valid ObjectId (not temp ID)
+      if (
+        variant._id &&
+        !variant._id.toString().startsWith("temp-") &&
+        variant._id.toString().match(/^[0-9a-fA-F]{24}$/)
+      ) {
+        processedVariant._id = variant._id
+      }
+      // If it's a temp ID or invalid format, completely omit the _id field - MongoDB will auto-generate one
 
       console.log(`✅ Processed variant ${index + 1}:`, processedVariant)
       return processedVariant
@@ -158,14 +167,36 @@ const generateSlug = (name) => {
     .replace(/(^-|-$)/g, "")
 }
 
-// Helper function to ensure all required models are loaded
+// FIXED: Helper function to ensure all required models are loaded
 const ensureModelsLoaded = (tenantDB) => {
   try {
-    const Product = require("../../models/tenant/Product")(tenantDB)
+    console.log("🔍 Loading models for tenant database...")
+
+    // Load Product model with error handling
+    let Product
+    try {
+      const ProductModel = require("../../models/tenant/Product")
+      if (typeof ProductModel === "function") {
+        Product = ProductModel(tenantDB)
+      } else {
+        throw new Error("Product model export is not a function")
+      }
+      console.log("✅ Product model loaded successfully")
+    } catch (productError) {
+      console.error("❌ Error loading Product model:", productError)
+      throw new Error(`Failed to load Product model: ${productError.message}`)
+    }
+
+    // Load Category model with fallback
     let Category
     try {
-      Category = require("../../models/tenant/Category")(tenantDB)
-      console.log("✅ Category model loaded")
+      const CategoryModel = require("../../models/tenant/Category")
+      if (typeof CategoryModel === "function") {
+        Category = CategoryModel(tenantDB)
+      } else {
+        throw new Error("Category model export is not a function")
+      }
+      console.log("✅ Category model loaded successfully")
     } catch (categoryError) {
       console.log("⚠️ Category model not found, creating basic schema")
       const mongoose = require("mongoose")
@@ -181,10 +212,16 @@ const ensureModelsLoaded = (tenantDB) => {
       Category = tenantDB.model("Category", categorySchema)
     }
 
+    // Load Offer model with fallback
     let Offer
     try {
-      Offer = require("../../models/tenant/Offer")(tenantDB)
-      console.log("✅ Offer model loaded")
+      const OfferModel = require("../../models/tenant/Offer")
+      if (typeof OfferModel === "function") {
+        Offer = OfferModel(tenantDB)
+      } else {
+        throw new Error("Offer model export is not a function")
+      }
+      console.log("✅ Offer model loaded successfully")
     } catch (offerError) {
       console.log("⚠️ Offer model not found, creating basic schema")
       const mongoose = require("mongoose")
@@ -200,10 +237,11 @@ const ensureModelsLoaded = (tenantDB) => {
       Offer = tenantDB.model("Offer", offerSchema)
     }
 
+    console.log("✅ All models loaded successfully")
     return { Product, Category, Offer }
   } catch (error) {
-    console.error("❌ Error loading models:", error)
-    throw error
+    console.error("❌ Error in ensureModelsLoaded:", error)
+    throw new Error(`Model loading failed: ${error.message}`)
   }
 }
 

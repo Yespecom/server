@@ -265,7 +265,7 @@ module.exports = (tenantDB) => {
         default: false,
         index: true,
       },
-      // FIXED: Variants validation with better error messages and context handling
+      // FIXED: Simplified variants validation
       variants: {
         type: [variantSchema],
         default: [],
@@ -275,8 +275,6 @@ module.exports = (tenantDB) => {
               hasVariants: this.hasVariants,
               hasVariantsType: typeof this.hasVariants,
               variantsLength: variants.length,
-              isNew: this.isNew,
-              // Remove isModified check as it's not available in all contexts
             })
 
             // If hasVariants is false, variants array must be empty
@@ -297,7 +295,7 @@ module.exports = (tenantDB) => {
               return skus.length === uniqueSkus.length
             }
 
-            // Default case - should not reach here
+            // Default case
             console.log("🔍 VALIDATION: Unexpected hasVariants value:", this.hasVariants)
             return true
           },
@@ -426,7 +424,7 @@ module.exports = (tenantDB) => {
     return Math.min(...prices)
   })
 
-  // FIXED: Pre-save middleware with better error handling and context awareness
+  // FIXED: Pre-save middleware with better error handling
   productSchema.pre("save", function (next) {
     try {
       // Generate slug if not provided
@@ -501,6 +499,33 @@ module.exports = (tenantDB) => {
         } else {
           // Remove stock field if not tracking quantity
           this.stock = undefined
+        }
+      }
+
+      next()
+    } catch (error) {
+      next(error)
+    }
+  })
+
+  // FIXED: Pre-update middleware for findByIdAndUpdate operations
+  productSchema.pre(["findOneAndUpdate", "updateOne", "updateMany"], function (next) {
+    try {
+      const update = this.getUpdate()
+      console.log("🔍 PRE-UPDATE: Processing update operation:", {
+        hasVariants: update.hasVariants,
+        variantsLength: update.variants ? update.variants.length : 0,
+        trackQuantity: update.trackQuantity,
+      })
+
+      // Handle variants validation for update operations
+      if (update.hasVariants === true || update.hasVariants === "true") {
+        if (!update.variants || update.variants.length === 0) {
+          return next(new Error("At least one variant is required when hasVariants is true"))
+        }
+      } else if (update.hasVariants === false || update.hasVariants === "false") {
+        if (update.variants && update.variants.length > 0) {
+          return next(new Error("Variants should be empty when hasVariants is false"))
         }
       }
 
@@ -620,31 +645,3 @@ module.exports = (tenantDB) => {
   const Product = tenantDB.model("Product", productSchema)
   return Product
 }
-
-// Add a pre-update middleware to handle findByIdAndUpdate operations
-const productSchema = mongoose.Schema // Declare productSchema variable before using it
-productSchema.pre(["findOneAndUpdate", "updateOne", "updateMany"], function (next) {
-  try {
-    const update = this.getUpdate()
-    console.log("🔍 PRE-UPDATE: Processing update operation:", {
-      hasVariants: update.hasVariants,
-      variantsLength: update.variants ? update.variants.length : 0,
-      trackQuantity: update.trackQuantity,
-    })
-
-    // Handle variants validation for update operations
-    if (update.hasVariants === true || update.hasVariants === "true") {
-      if (!update.variants || update.variants.length === 0) {
-        return next(new Error("At least one variant is required when hasVariants is true"))
-      }
-    } else if (update.hasVariants === false || update.hasVariants === "false") {
-      if (update.variants && update.variants.length > 0) {
-        return next(new Error("Variants should be empty when hasVariants is false"))
-      }
-    }
-
-    next()
-  } catch (error) {
-    next(error)
-  }
-})

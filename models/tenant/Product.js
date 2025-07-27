@@ -271,27 +271,55 @@ module.exports = (tenantDB) => {
         default: [],
         validate: {
           validator: function (variants) {
+            console.log("🔍 VALIDATION DEBUG:", {
+              hasVariants: this.hasVariants,
+              hasVariantsType: typeof this.hasVariants,
+              variantsLength: variants.length,
+              isModified: this.isModified("hasVariants"),
+              isNew: this.isNew,
+            })
+
             // If hasVariants is false, variants array must be empty
-            if (!this.hasVariants) {
+            if (this.hasVariants === false || this.hasVariants === "false") {
+              console.log("🔍 hasVariants is FALSE, checking if variants is empty:", variants.length === 0)
               return variants.length === 0
             }
+
             // If hasVariants is true, must have at least one variant
-            if (variants.length === 0) {
-              return false
+            if (this.hasVariants === true || this.hasVariants === "true") {
+              console.log("🔍 hasVariants is TRUE, checking if variants exist:", variants.length > 0)
+              if (variants.length === 0) {
+                return false
+              }
+              // Check for duplicate SKUs within variants
+              const skus = variants.map((v) => v.sku)
+              const uniqueSkus = [...new Set(skus)]
+              return skus.length === uniqueSkus.length
             }
-            // Check for duplicate SKUs within variants
-            const skus = variants.map((v) => v.sku)
-            const uniqueSkus = [...new Set(skus)]
-            return skus.length === uniqueSkus.length
+
+            // Default case - should not reach here
+            console.log("🔍 VALIDATION: Unexpected hasVariants value:", this.hasVariants)
+            return true
           },
           message: function (props) {
-            if (!this.hasVariants && props.value.length > 0) {
-              return "Variants should be empty when hasVariants is false"
+            console.log("🔍 VALIDATION ERROR - props:", {
+              hasVariants: this.hasVariants,
+              variantsLength: props.value.length,
+              path: props.path,
+            })
+
+            if (this.hasVariants === false || this.hasVariants === "false") {
+              if (props.value.length > 0) {
+                return "Variants should be empty when hasVariants is false"
+              }
             }
-            if (this.hasVariants && props.value.length === 0) {
-              return "At least one variant is required when hasVariants is true"
+            if (this.hasVariants === true || this.hasVariants === "true") {
+              if (props.value.length === 0) {
+                return "At least one variant is required when hasVariants is true"
+              }
+              return "Duplicate variant SKUs are not allowed"
             }
-            return "Duplicate variant SKUs are not allowed"
+            return "Variant validation failed"
           },
         },
       },
@@ -422,7 +450,8 @@ module.exports = (tenantDB) => {
       }
 
       // Validate variant-specific logic
-      if (this.hasVariants) {
+      if (this.hasVariants === true || this.hasVariants === "true") {
+        console.log("🔍 PRE-SAVE: Processing variant product")
         // Reset main product price for variant products
         this.price = 0
 
@@ -459,6 +488,7 @@ module.exports = (tenantDB) => {
           }
         }
       } else {
+        console.log("🔍 PRE-SAVE: Processing non-variant product")
         // Clear variants for non-variant products
         this.variants = []
 

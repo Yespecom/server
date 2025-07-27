@@ -685,8 +685,9 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
 
     // Parse and validate variants
     let parsedVariants = []
-    const isVariantProduct = hasVariants === "true" || hasVariants === true
-    console.log("🔍 Is variant product:", isVariantProduct, "from hasVariants:", hasVariants)
+    // FIXED: Ensure proper boolean conversion for hasVariants
+    const isVariantProduct = hasVariants === "true" || hasVariants === true || hasVariants === 1
+    console.log("🔍 Is variant product:", isVariantProduct, "from hasVariants:", hasVariants, typeof hasVariants)
 
     try {
       if (isVariantProduct) {
@@ -765,7 +766,7 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
       metaTitle: metaTitle?.trim() || product.metaTitle,
       metaDescription: metaDescription?.trim() || product.metaDescription,
       offer: parseOfferField(offer),
-      hasVariants: isVariantProduct,
+      hasVariants: isVariantProduct, // FIXED: Use the properly parsed boolean
       variants: parsedVariants, // This will be [] when hasVariants is false
       trackQuantity: shouldTrackQuantity,
     }

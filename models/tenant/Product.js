@@ -6,7 +6,7 @@ module.exports = (tenantDB) => {
     return tenantDB.models.Product
   }
 
-  // Variant subdocument schema
+  // FIXED: Variant subdocument schema with better stock handling
   const variantSchema = new mongoose.Schema(
     {
       name: {
@@ -43,30 +43,19 @@ module.exports = (tenantDB) => {
           message: "Original price must be a valid positive number",
         },
       },
-      // FIXED: Stock is now conditionally required based on parent product's trackQuantity setting
+      // FIXED: Stock field with simpler validation
       stock: {
         type: String,
-        required: function () {
-          // Access parent document's trackQuantity field
-          const parent = this.parent()
-          return parent && parent.trackQuantity === true
-        },
         validate: {
-          validator: function (v) {
-            const parent = this.parent()
-            // Skip validation if quantity tracking is disabled
-            if (!parent || parent.trackQuantity !== true) return true
-
-            // If tracking is enabled, validate the stock value
-            if (v === undefined || v === null) return false
-            const stock = Number.parseInt(v)
-            return !isNaN(stock) && stock >= 0
+          validator: (v) => {
+            // If stock field is present, validate it
+            if (v !== undefined && v !== null) {
+              const stock = Number.parseInt(v)
+              return !isNaN(stock) && stock >= 0
+            }
+            return true // Allow undefined/null values
           },
-          message: "Stock must be a valid non-negative number when quantity tracking is enabled",
-        },
-        default: function () {
-          const parent = this.parent()
-          return parent && parent.trackQuantity === true ? "0" : undefined
+          message: "Stock must be a valid non-negative number",
         },
       },
       sku: {
@@ -167,14 +156,12 @@ module.exports = (tenantDB) => {
           maxlength: [50, "Tag cannot exceed 50 characters"],
         },
       ],
-
-      // NEW: Quantity tracking toggle
+      // Quantity tracking toggle
       trackQuantity: {
         type: Boolean,
         default: true,
         index: true,
       },
-
       // Pricing fields (for non-variant products)
       price: {
         type: Number,
@@ -207,24 +194,20 @@ module.exports = (tenantDB) => {
         min: [0, "Tax percentage cannot be negative"],
         max: [100, "Tax percentage cannot exceed 100%"],
       },
-
-      // FIXED: Stock fields (now conditionally required based on trackQuantity)
+      // FIXED: Stock field with simpler validation
       stock: {
         type: Number,
-        required: function () {
-          return !this.hasVariants && this.trackQuantity === true
-        },
         min: [0, "Stock cannot be negative"],
         validate: {
           validator: function (v) {
-            // Skip validation for variant products or when tracking is disabled
-            if (this.hasVariants || this.trackQuantity !== true) return true
+            // Skip validation for variant products
+            if (this.hasVariants) return true
+            // Skip validation if quantity tracking is disabled
+            if (this.trackQuantity !== true) return true
+            // If tracking is enabled and not variant product, stock is required
             return v != null && v >= 0
           },
           message: "Stock is required for non-variant products when quantity tracking is enabled",
-        },
-        default: function () {
-          return this.trackQuantity === true ? 0 : undefined
         },
         index: true,
       },
@@ -237,7 +220,6 @@ module.exports = (tenantDB) => {
         type: Boolean,
         default: false,
       },
-
       // Media fields
       thumbnail: {
         type: String,
@@ -250,7 +232,6 @@ module.exports = (tenantDB) => {
           trim: true,
         },
       ],
-
       // Physical properties
       weight: {
         type: Number,
@@ -261,7 +242,6 @@ module.exports = (tenantDB) => {
         type: dimensionsSchema,
         default: () => ({ length: 0, width: 0, height: 0 }),
       },
-
       // SEO fields
       metaTitle: {
         type: String,
@@ -273,32 +253,32 @@ module.exports = (tenantDB) => {
         trim: true,
         maxlength: [160, "Meta description cannot exceed 160 characters"],
       },
-
       // Offer/Discount
       offer: {
         type: mongoose.Schema.Types.ObjectId,
         ref: "Offer",
         default: null,
       },
-
       // Variant system
       hasVariants: {
         type: Boolean,
         default: false,
         index: true,
       },
+      // FIXED: Variants validation with better error messages
       variants: {
         type: [variantSchema],
         default: [],
         validate: {
           validator: function (variants) {
+            // If hasVariants is false, variants array must be empty
             if (!this.hasVariants) {
               return variants.length === 0
             }
+            // If hasVariants is true, must have at least one variant
             if (variants.length === 0) {
-              return false // Must have at least one variant if hasVariants is true
+              return false
             }
-
             // Check for duplicate SKUs within variants
             const skus = variants.map((v) => v.sku)
             const uniqueSkus = [...new Set(skus)]
@@ -315,15 +295,13 @@ module.exports = (tenantDB) => {
           },
         },
       },
-
       // Status and timestamps
       isActive: {
         type: Boolean,
         default: true,
         index: true,
       },
-
-      // FIXED: Computed fields (now handles optional stock based on trackQuantity)
+      // Computed fields
       stockStatus: {
         type: String,
         enum: ["in-stock", "low-stock", "out-of-stock", "backorderable", "not-tracked"],
@@ -331,7 +309,6 @@ module.exports = (tenantDB) => {
           return this.trackQuantity === true ? "in-stock" : "not-tracked"
         },
       },
-
       // Analytics fields
       viewCount: {
         type: Number,
@@ -359,7 +336,6 @@ module.exports = (tenantDB) => {
               delete ret.stock
             }
           }
-
           // Convert variant prices and stocks to numbers
           if (ret.variants && ret.variants.length > 0) {
             ret.variants = ret.variants.map((variant) => {
@@ -368,18 +344,15 @@ module.exports = (tenantDB) => {
                 price: Number.parseFloat(variant.price) || 0,
                 originalPrice: variant.originalPrice ? Number.parseFloat(variant.originalPrice) : undefined,
               }
-
               // Only include stock if quantity tracking is enabled
-              if (ret.trackQuantity === true) {
+              if (ret.trackQuantity === true && variant.stock !== undefined) {
                 processedVariant.stock = Number.parseInt(variant.stock) || 0
               } else {
                 delete processedVariant.stock
               }
-
               return processedVariant
             })
           }
-
           return ret
         },
       },
@@ -406,7 +379,7 @@ module.exports = (tenantDB) => {
     return 0
   })
 
-  // FIXED: Virtual for total variant stock (only if tracking quantity)
+  // Virtual for total variant stock (only if tracking quantity)
   productSchema.virtual("totalVariantStock").get(function () {
     if (!this.hasVariants || !this.variants || this.variants.length === 0 || this.trackQuantity !== true) {
       return 0
@@ -425,76 +398,89 @@ module.exports = (tenantDB) => {
     return Math.min(...prices)
   })
 
-  // FIXED: Pre-save middleware with proper trackQuantity handling
+  // FIXED: Pre-save middleware with better error handling
   productSchema.pre("save", function (next) {
-    // Generate slug if not provided
-    if (!this.slug && this.name) {
-      this.slug = this.name
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "-")
-        .replace(/(^-|-$)/g, "")
-    }
+    try {
+      // Generate slug if not provided
+      if (!this.slug && this.name) {
+        this.slug = this.name
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/(^-|-$)/g, "")
+      }
 
-    // Update stock status only if tracking quantity
-    if (this.trackQuantity === true) {
-      this.updateStockStatus()
-    } else {
-      this.stockStatus = "not-tracked"
-    }
-
-    // Set thumbnail from gallery if not set
-    if (!this.thumbnail && this.gallery && this.gallery.length > 0) {
-      this.thumbnail = this.gallery[0]
-    }
-
-    // Validate variant-specific logic
-    if (this.hasVariants) {
-      // Reset main product price for variant products
-      this.price = 0
-
-      // Handle stock for variant products
+      // Update stock status only if tracking quantity
       if (this.trackQuantity === true) {
-        this.stock = 0 // Variants handle their own stock
+        this.updateStockStatus()
       } else {
-        this.stock = undefined // Remove stock field if not tracking
+        this.stockStatus = "not-tracked"
       }
 
-      // Ensure we have variants
-      if (!this.variants || this.variants.length === 0) {
-        return next(new Error("At least one variant is required when hasVariants is true"))
+      // Set thumbnail from gallery if not set
+      if (!this.thumbnail && this.gallery && this.gallery.length > 0) {
+        this.thumbnail = this.gallery[0]
       }
 
-      // Validate variant SKUs are unique
-      const variantSkus = this.variants.map((v) => v.sku)
-      const uniqueSkus = [...new Set(variantSkus)]
-      if (variantSkus.length !== uniqueSkus.length) {
-        return next(new Error("Variant SKUs must be unique"))
-      }
+      // Validate variant-specific logic
+      if (this.hasVariants) {
+        // Reset main product price for variant products
+        this.price = 0
 
-      // Check for duplicate with main product SKU
-      if (variantSkus.includes(this.sku)) {
-        return next(new Error("Variant SKU cannot be the same as product SKU"))
-      }
-    } else {
-      // Clear variants for non-variant products
-      this.variants = []
+        // Handle stock for variant products
+        if (this.trackQuantity === true) {
+          this.stock = 0 // Variants handle their own stock
+        } else {
+          this.stock = undefined // Remove stock field if not tracking
+        }
 
-      // Handle stock for non-variant products
-      if (this.trackQuantity === true) {
-        // Set default stock if tracking quantity and no stock is set
-        if (this.stock === undefined || this.stock === null) {
-          this.stock = 0
+        // Ensure we have variants
+        if (!this.variants || this.variants.length === 0) {
+          return next(new Error("At least one variant is required when hasVariants is true"))
+        }
+
+        // Validate variant SKUs are unique
+        const variantSkus = this.variants.map((v) => v.sku)
+        const uniqueSkus = [...new Set(variantSkus)]
+        if (variantSkus.length !== uniqueSkus.length) {
+          return next(new Error("Variant SKUs must be unique"))
+        }
+
+        // Check for duplicate with main product SKU
+        if (variantSkus.includes(this.sku)) {
+          return next(new Error("Variant SKU cannot be the same as product SKU"))
+        }
+
+        // FIXED: Validate variant stock fields based on trackQuantity
+        if (this.trackQuantity === true) {
+          for (const variant of this.variants) {
+            if (variant.stock === undefined || variant.stock === null || variant.stock === "") {
+              return next(new Error(`Variant "${variant.name}" requires stock when quantity tracking is enabled`))
+            }
+          }
         }
       } else {
-        // Remove stock field if not tracking quantity
-        this.stock = undefined
-      }
-    }
+        // Clear variants for non-variant products
+        this.variants = []
 
-    next()
+        // Handle stock for non-variant products
+        if (this.trackQuantity === true) {
+          // Set default stock if tracking quantity and no stock is set
+          if (this.stock === undefined || this.stock === null) {
+            this.stock = 0
+          }
+        } else {
+          // Remove stock field if not tracking quantity
+          this.stock = undefined
+        }
+      }
+
+      next()
+    } catch (error) {
+      next(error)
+    }
   })
 
-  // FIXED: Instance method to update stock status (only if tracking quantity)
+  // Instance method to update stock status (only if tracking quantity)
   productSchema.methods.updateStockStatus = function () {
     if (this.trackQuantity !== true) {
       this.stockStatus = "not-tracked"
@@ -502,7 +488,6 @@ module.exports = (tenantDB) => {
     }
 
     let currentStock = this.stock || 0
-
     if (this.hasVariants) {
       currentStock = this.totalVariantStock
     }
@@ -516,42 +501,37 @@ module.exports = (tenantDB) => {
     }
   }
 
-  // FIXED: Instance method to check if product is in stock (only if tracking quantity)
+  // Instance method to check if product is in stock (only if tracking quantity)
   productSchema.methods.isInStock = function () {
     if (this.trackQuantity !== true) {
       return true // Always available if not tracking quantity
     }
-
     if (this.hasVariants) {
       return this.variants.some((variant) => Number.parseInt(variant.stock || 0) > 0)
     }
     return (this.stock || 0) > 0
   }
 
-  // FIXED: Instance method to get available stock (only if tracking quantity)
+  // Instance method to get available stock (only if tracking quantity)
   productSchema.methods.getAvailableStock = function (variantId = null) {
     if (this.trackQuantity !== true) {
       return Number.POSITIVE_INFINITY // Unlimited if not tracking quantity
     }
-
     if (this.hasVariants && variantId) {
       const variant = this.variants.id(variantId)
       return variant ? Number.parseInt(variant.stock || 0) : 0
     }
-
     if (this.hasVariants) {
       return this.totalVariantStock
     }
-
     return this.stock || 0
   }
 
-  // FIXED: Instance method to reduce stock (only if tracking quantity)
+  // Instance method to reduce stock (only if tracking quantity)
   productSchema.methods.reduceStock = function (quantity, variantId = null) {
     if (this.trackQuantity !== true) {
       return // Do nothing if not tracking quantity
     }
-
     if (this.hasVariants && variantId) {
       const variant = this.variants.id(variantId)
       if (variant) {
@@ -561,7 +541,6 @@ module.exports = (tenantDB) => {
     } else if (!this.hasVariants) {
       this.stock = Math.max(0, (this.stock || 0) - quantity)
     }
-
     this.updateStockStatus()
   }
 
@@ -586,11 +565,10 @@ module.exports = (tenantDB) => {
         },
       ],
     }
-
     return this.find(query, null, options).populate("category", "name slug").populate("offer", "name type value")
   }
 
-  // FIXED: Static method to get low stock products (only for products tracking quantity)
+  // Static method to get low stock products (only for products tracking quantity)
   productSchema.statics.getLowStockProducts = function () {
     return this.find({
       trackQuantity: true,
@@ -610,6 +588,5 @@ module.exports = (tenantDB) => {
 
   // Create and return the model
   const Product = tenantDB.model("Product", productSchema)
-
   return Product
 }

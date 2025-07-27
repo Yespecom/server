@@ -24,15 +24,10 @@ const fileUpload = multer({
 // Helper functions for data parsing
 const parseExistingImages = (existingImages) => {
   console.log("🔍 Parsing existingImages:", existingImages, typeof existingImages)
-
   if (!existingImages) return []
   if (Array.isArray(existingImages)) return existingImages
-
   if (typeof existingImages === "string") {
-    // Handle empty string
     if (existingImages.trim() === "") return []
-
-    // Handle JSON string
     if (existingImages.startsWith("[") || existingImages.startsWith("{")) {
       try {
         const parsed = JSON.parse(existingImages)
@@ -42,53 +37,117 @@ const parseExistingImages = (existingImages) => {
         return []
       }
     } else {
-      // Handle single URL string
       return [existingImages]
     }
   }
-
   return []
 }
 
 const parseOfferField = (offer) => {
   console.log("🔍 Parsing offer field:", offer, typeof offer)
-
   if (!offer || offer === "none" || offer === "" || offer === "null" || offer === "undefined") {
     return null
   }
-
-  // If it's already a valid ObjectId string
   if (typeof offer === "string" && offer.match(/^[0-9a-fA-F]{24}$/)) {
     return offer
   }
-
-  // If it's an array, take the first valid ObjectId
   if (Array.isArray(offer)) {
     const validId = offer.find((id) => id && typeof id === "string" && id.match(/^[0-9a-fA-F]{24}$/))
     return validId || null
   }
-
   return null
 }
 
+// FIXED: Enhanced variant parsing with proper validation and conversion
 const parseVariants = (variants, hasVariants) => {
   console.log("🔍 Parsing variants:", variants, "hasVariants:", hasVariants)
 
-  if (!hasVariants || hasVariants === "false") return []
-  if (!variants) return []
-
-  try {
-    if (typeof variants === "string") {
-      return JSON.parse(variants)
-    }
-    if (Array.isArray(variants)) {
-      return variants
-    }
-  } catch (e) {
-    console.error("❌ Error parsing variants:", e)
+  // Return empty array if variants are not enabled
+  if (!hasVariants || hasVariants === "false" || hasVariants === false) {
+    console.log("📝 Variants disabled, returning empty array")
+    return []
   }
 
-  return []
+  if (!variants) {
+    console.log("📝 No variants data provided")
+    return []
+  }
+
+  try {
+    let parsedVariants = []
+
+    // Parse variants from string or use array directly
+    if (typeof variants === "string") {
+      parsedVariants = JSON.parse(variants)
+    } else if (Array.isArray(variants)) {
+      parsedVariants = variants
+    } else {
+      console.log("📝 Invalid variants format")
+      return []
+    }
+
+    // Validate and process each variant
+    const processedVariants = parsedVariants.map((variant, index) => {
+      console.log(`🔄 Processing variant ${index + 1}:`, variant)
+
+      // Validate required fields
+      if (!variant.name || !variant.price || !variant.stock || !variant.sku) {
+        console.error(`❌ Variant ${index + 1} missing required fields:`, {
+          name: !!variant.name,
+          price: !!variant.price,
+          stock: !!variant.stock,
+          sku: !!variant.sku,
+        })
+        throw new Error(`Variant ${index + 1} is missing required fields (name, price, stock, sku)`)
+      }
+
+      // Convert and validate numeric fields
+      const price = Number.parseFloat(variant.price)
+      const originalPrice = variant.originalPrice ? Number.parseFloat(variant.originalPrice) : undefined
+      const stock = Number.parseInt(variant.stock)
+
+      if (isNaN(price) || price < 0) {
+        throw new Error(`Variant "${variant.name}" has invalid price: ${variant.price}`)
+      }
+
+      if (isNaN(stock) || stock < 0) {
+        throw new Error(`Variant "${variant.name}" has invalid stock: ${variant.stock}`)
+      }
+
+      if (originalPrice !== undefined && (isNaN(originalPrice) || originalPrice < 0)) {
+        throw new Error(`Variant "${variant.name}" has invalid original price: ${variant.originalPrice}`)
+      }
+
+      // Create processed variant object
+      const processedVariant = {
+        _id: variant._id || undefined, // Keep existing ID if updating
+        name: variant.name.trim(),
+        options: Array.isArray(variant.options) ? variant.options : [variant.name.trim()],
+        price: price.toString(), // Keep as string to match schema
+        originalPrice: originalPrice ? originalPrice.toString() : undefined,
+        stock: stock.toString(), // Keep as string to match schema
+        sku: variant.sku.trim().toUpperCase(),
+        isActive: variant.isActive !== undefined ? Boolean(variant.isActive) : true,
+        image: variant.image || "",
+      }
+
+      console.log(`✅ Processed variant ${index + 1}:`, processedVariant)
+      return processedVariant
+    })
+
+    // Check for duplicate SKUs within variants
+    const skus = processedVariants.map((v) => v.sku)
+    const duplicateSkus = skus.filter((sku, index) => skus.indexOf(sku) !== index)
+    if (duplicateSkus.length > 0) {
+      throw new Error(`Duplicate variant SKUs found: ${duplicateSkus.join(", ")}`)
+    }
+
+    console.log(`✅ Successfully processed ${processedVariants.length} variants`)
+    return processedVariants
+  } catch (e) {
+    console.error("❌ Error parsing variants:", e)
+    throw new Error(`Variant parsing failed: ${e.message}`)
+  }
 }
 
 const generateSlug = (name) => {
@@ -102,10 +161,7 @@ const generateSlug = (name) => {
 // Helper function to ensure all required models are loaded
 const ensureModelsLoaded = (tenantDB) => {
   try {
-    // Load all required models for this tenant database
     const Product = require("../../models/tenant/Product")(tenantDB)
-
-    // Try to load Category model
     let Category
     try {
       Category = require("../../models/tenant/Category")(tenantDB)
@@ -125,7 +181,6 @@ const ensureModelsLoaded = (tenantDB) => {
       Category = tenantDB.model("Category", categorySchema)
     }
 
-    // Try to load Offer model
     let Offer
     try {
       Offer = require("../../models/tenant/Offer")(tenantDB)
@@ -164,113 +219,14 @@ const ensureUploadDirs = () => {
   })
 }
 
-// Call this when the module loads
 ensureUploadDirs()
-
-// Test connection endpoint
-router.get("/test-connection", async (req, res) => {
-  try {
-    console.log("🧪 Testing products API connection...")
-
-    const testData = {
-      hasAuth: !!req.user,
-      hasTenantDB: !!req.tenantDB,
-      tenantId: req.tenantId,
-      storeId: req.storeId,
-      userEmail: req.user?.email,
-      timestamp: new Date().toISOString(),
-    }
-
-    if (req.tenantDB) {
-      testData.dbState = req.tenantDB.readyState
-      testData.dbName = req.tenantDB.name
-
-      // Test if we can load all models
-      try {
-        const models = ensureModelsLoaded(req.tenantDB)
-        testData.modelsLoaded = {
-          Product: !!models.Product,
-          Category: !!models.Category,
-          Offer: !!models.Offer,
-        }
-        console.log("✅ All models loaded successfully")
-      } catch (modelError) {
-        testData.modelsLoaded = false
-        testData.modelError = modelError.message
-        console.error("❌ Model load error:", modelError)
-      }
-    }
-
-    res.json({
-      success: true,
-      message: "Products API connection test passed",
-      data: testData,
-    })
-  } catch (error) {
-    console.error("❌ Test connection error:", error)
-    res.status(500).json({
-      success: false,
-      error: "Test failed",
-      details: error.message,
-      stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
-    })
-  }
-})
-
-// Test Cloudinary connection
-router.get("/test-cloudinary", async (req, res) => {
-  try {
-    console.log("🧪 Testing Cloudinary configuration...")
-
-    // Check if Cloudinary config exists
-    const cloudinary = require("cloudinary").v2
-    const config = cloudinary.config()
-
-    const testData = {
-      hasCloudName: !!config.cloud_name,
-      hasApiKey: !!config.api_key,
-      hasApiSecret: !!config.api_secret,
-      cloudName: config.cloud_name,
-      timestamp: new Date().toISOString(),
-    }
-
-    console.log("🧪 Cloudinary config test:", testData)
-
-    // Try to get account details (this will fail if credentials are wrong)
-    try {
-      const result = await cloudinary.api.ping()
-      testData.pingResult = result
-      testData.connectionStatus = "success"
-    } catch (pingError) {
-      console.error("❌ Cloudinary ping failed:", pingError)
-      testData.connectionStatus = "failed"
-      testData.pingError = pingError.message
-    }
-
-    res.json({
-      success: true,
-      message: "Cloudinary test completed",
-      data: testData,
-    })
-  } catch (error) {
-    console.error("❌ Cloudinary test error:", error)
-    res.status(500).json({
-      success: false,
-      error: "Cloudinary test failed",
-      details: error.message,
-      stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
-    })
-  }
-})
 
 // Get all products
 router.get("/", async (req, res) => {
   try {
     console.log("🔍 Getting all products...")
-
     const { Product } = ensureModelsLoaded(req.tenantDB)
 
-    // Try to get products with populate, fallback to without populate
     let products
     try {
       products = await Product.find()
@@ -299,10 +255,8 @@ router.get("/", async (req, res) => {
 router.get("/:id", async (req, res) => {
   try {
     console.log("🔍 Getting product:", req.params.id)
-
     const { Product } = ensureModelsLoaded(req.tenantDB)
 
-    // Try with populate first, fallback to without
     let product
     try {
       product = await Product.findById(req.params.id)
@@ -331,7 +285,7 @@ router.get("/:id", async (req, res) => {
   }
 })
 
-// Create product - FIXED VERSION
+// FIXED: Create product with proper variant handling
 router.post("/", fileUpload.array("images", 10), async (req, res) => {
   try {
     console.log("📝 Creating new product...")
@@ -363,6 +317,28 @@ router.post("/", fileUpload.array("images", 10), async (req, res) => {
       existingImages,
     } = req.body
 
+    // Validate required fields
+    if (!name || !name.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: "Product name is required",
+      })
+    }
+
+    if (!sku || !sku.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: "SKU is required",
+      })
+    }
+
+    if (!category) {
+      return res.status(400).json({
+        success: false,
+        error: "Category is required",
+      })
+    }
+
     // Parse existing images
     let gallery = parseExistingImages(existingImages)
     console.log("📸 Parsed existing images:", gallery)
@@ -384,17 +360,66 @@ router.post("/", fileUpload.array("images", 10), async (req, res) => {
       }
     }
 
-    // Validate required images
-    if (gallery.length === 0) {
+    // Parse and validate variants
+    let parsedVariants = []
+    const isVariantProduct = hasVariants === "true" || hasVariants === true
+
+    try {
+      parsedVariants = parseVariants(variants, isVariantProduct)
+      console.log("🔄 Parsed variants:", parsedVariants)
+    } catch (variantError) {
+      console.error("❌ Variant parsing error:", variantError)
+      return res.status(400).json({
+        success: false,
+        error: "Variant validation failed",
+        details: variantError.message,
+      })
+    }
+
+    // Validate images based on product type
+    if (!isVariantProduct && gallery.length === 0) {
       return res.status(400).json({
         success: false,
         error: "At least one product image is required",
       })
     }
 
-    // Parse variants if hasVariants is true
-    const parsedVariants = parseVariants(variants, hasVariants)
-    console.log("🔄 Parsed variants:", parsedVariants)
+    if (isVariantProduct) {
+      if (parsedVariants.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: "At least one variant is required when variants are enabled",
+        })
+      }
+
+      // For variant products, check if at least one image exists (main or variant)
+      const hasMainImages = gallery.length > 0
+      const hasVariantImages = parsedVariants.some((variant) => variant.image && variant.image.trim() !== "")
+
+      if (!hasMainImages && !hasVariantImages) {
+        return res.status(400).json({
+          success: false,
+          error: "At least one image is required (either main product images or variant images)",
+        })
+      }
+    }
+
+    // Validate non-variant product fields
+    if (!isVariantProduct) {
+      if (!price || Number.parseFloat(price) <= 0) {
+        return res.status(400).json({
+          success: false,
+          error: "Price must be greater than 0",
+        })
+      }
+
+      if (!stock || Number.parseInt(stock) < 0) {
+        return res.status(400).json({
+          success: false,
+          error: "Stock quantity cannot be negative",
+        })
+      }
+    }
 
     // Parse dimensions
     let parsedDimensions = { length: 0, width: 0, height: 0 }
@@ -428,38 +453,42 @@ router.post("/", fileUpload.array("images", 10), async (req, res) => {
 
     // Create product data
     const productData = {
-      name: name?.trim(),
+      name: name.trim(),
       slug,
-      sku: sku?.toUpperCase().trim(),
+      sku: sku.toUpperCase().trim(),
       category,
       tags: parsedTags,
-      shortDescription: shortDescription?.trim(),
-      description: description?.trim(),
-      price: Number.parseFloat(price) || 0,
-      originalPrice: originalPrice ? Number.parseFloat(originalPrice) : undefined,
+      shortDescription: shortDescription?.trim() || "",
+      description: description?.trim() || "",
+      price: isVariantProduct ? 0 : Number.parseFloat(price) || 0,
+      originalPrice: !isVariantProduct && originalPrice ? Number.parseFloat(originalPrice) : undefined,
       taxPercentage: Number.parseFloat(taxPercentage) || 0,
-      stock: Number.parseInt(stock) || 0,
+      stock: isVariantProduct ? 0 : Number.parseInt(stock) || 0,
       lowStockAlert: Number.parseInt(lowStockAlert) || 5,
       allowBackorders: allowBackorders === "true" || allowBackorders === true,
-      thumbnail: gallery[0],
+      thumbnail: gallery.length > 0 ? gallery[0] : "",
       gallery,
       weight: Number.parseFloat(weight) || 0,
       dimensions: parsedDimensions,
-      metaTitle: metaTitle?.trim(),
-      metaDescription: metaDescription?.trim(),
+      metaTitle: metaTitle?.trim() || "",
+      metaDescription: metaDescription?.trim() || "",
       offer: parseOfferField(offer),
-      hasVariants: hasVariants === "true" || hasVariants === true,
+      hasVariants: isVariantProduct,
       variants: parsedVariants,
       isActive: true,
     }
 
-    console.log("📋 Final product data:", productData)
+    console.log("📋 Final product data:", {
+      ...productData,
+      variants: productData.variants.length > 0 ? `${productData.variants.length} variants` : "no variants",
+    })
 
     // Create and save product
     const product = new Product(productData)
     await product.save()
 
     console.log("✅ Product created successfully:", product._id)
+    console.log("✅ Product variants saved:", product.variants.length)
 
     // Try to populate the response
     try {
@@ -506,7 +535,7 @@ router.post("/", fileUpload.array("images", 10), async (req, res) => {
   }
 })
 
-// Update product - FIXED VERSION
+// FIXED: Update product with proper variant handling
 router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
   try {
     console.log("📝 Updating product:", req.params.id)
@@ -564,18 +593,31 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
       }
     }
 
-    // Parse and validate fields
-    const parsedPrice = Number.parseFloat(price) || product.price
-    let parsedOriginalPrice = originalPrice ? Number.parseFloat(originalPrice) : undefined
+    // Parse and validate variants
+    let parsedVariants = []
+    const isVariantProduct = hasVariants === "true" || hasVariants === true
+
+    try {
+      parsedVariants = parseVariants(variants, isVariantProduct)
+      console.log("🔄 Updated variants:", parsedVariants)
+    } catch (variantError) {
+      console.error("❌ Variant parsing error:", variantError)
+      return res.status(400).json({
+        success: false,
+        error: "Variant validation failed",
+        details: variantError.message,
+      })
+    }
+
+    // Parse and validate other fields
+    const parsedPrice = isVariantProduct ? 0 : Number.parseFloat(price) || product.price
+    let parsedOriginalPrice = !isVariantProduct && originalPrice ? Number.parseFloat(originalPrice) : undefined
 
     // Handle originalPrice validation logic
     if (parsedOriginalPrice && parsedOriginalPrice < parsedPrice) {
       console.log("⚠️ Original price is less than current price, setting to null")
       parsedOriginalPrice = undefined
     }
-
-    // Parse other fields
-    const parsedVariants = parseVariants(variants, hasVariants)
 
     let parsedDimensions = product.dimensions || { length: 0, width: 0, height: 0 }
     try {
@@ -618,7 +660,7 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
       price: parsedPrice,
       originalPrice: parsedOriginalPrice,
       taxPercentage: Number.parseFloat(taxPercentage) || product.taxPercentage || 0,
-      stock: Number.parseInt(stock) || product.stock || 0,
+      stock: isVariantProduct ? 0 : Number.parseInt(stock) || product.stock || 0,
       lowStockAlert: Number.parseInt(lowStockAlert) || product.lowStockAlert || 5,
       allowBackorders: allowBackorders === "true" || allowBackorders === true,
       gallery,
@@ -628,9 +670,14 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
       metaTitle: metaTitle?.trim() || product.metaTitle,
       metaDescription: metaDescription?.trim() || product.metaDescription,
       offer: parseOfferField(offer),
-      hasVariants: hasVariants === "true" || hasVariants === true,
+      hasVariants: isVariantProduct,
       variants: parsedVariants,
     }
+
+    console.log("📋 Update data:", {
+      ...updateData,
+      variants: updateData.variants.length > 0 ? `${updateData.variants.length} variants` : "no variants",
+    })
 
     const updatedProduct = await Product.findByIdAndUpdate(req.params.id, updateData, {
       new: true,
@@ -646,6 +693,7 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
     }
 
     console.log("✅ Product updated successfully:", updatedProduct._id)
+    console.log("✅ Product variants updated:", updatedProduct.variants.length)
 
     res.json({
       success: true,
@@ -688,7 +736,6 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
 router.delete("/:id", async (req, res) => {
   try {
     console.log("🗑️ Deleting product:", req.params.id)
-
     const { Product } = ensureModelsLoaded(req.tenantDB)
 
     const product = await Product.findById(req.params.id)
@@ -713,11 +760,9 @@ router.delete("/:id", async (req, res) => {
       }
     } catch (imageError) {
       console.error("⚠️ Error deleting images:", imageError)
-      // Continue with product deletion even if image deletion fails
     }
 
     await Product.findByIdAndDelete(req.params.id)
-
     console.log("✅ Product deleted successfully:", req.params.id)
 
     res.json({
@@ -734,13 +779,10 @@ router.delete("/:id", async (req, res) => {
   }
 })
 
-// Upload single image endpoint - FIXED VERSION
+// Upload single image endpoint
 router.post("/upload-image", fileUpload.single("image"), async (req, res) => {
   try {
     console.log("📸 Upload image endpoint hit")
-    console.log("📋 Request headers:", req.headers)
-    console.log("📋 Request file:", req.file ? "File present" : "No file")
-    console.log("📋 Request body:", req.body)
 
     if (!req.file) {
       console.error("❌ No file provided")
@@ -749,13 +791,6 @@ router.post("/upload-image", fileUpload.single("image"), async (req, res) => {
         error: "No image file provided",
       })
     }
-
-    console.log("📸 File details:", {
-      originalname: req.file.originalname,
-      mimetype: req.file.mimetype,
-      size: req.file.size,
-      buffer: req.file.buffer ? "Buffer present" : "No buffer",
-    })
 
     // Validate file type
     if (!req.file.mimetype.startsWith("image/")) {
@@ -776,15 +811,11 @@ router.post("/upload-image", fileUpload.single("image"), async (req, res) => {
     }
 
     console.log("📸 Starting Cloudinary upload...")
-
-    // Upload to Cloudinary
     const result = await upload(req.file.buffer, "yesp-products")
 
     console.log("✅ Cloudinary upload successful:", {
       public_id: result.public_id,
       secure_url: result.secure_url,
-      width: result.width,
-      height: result.height,
     })
 
     res.json({
@@ -796,9 +827,7 @@ router.post("/upload-image", fileUpload.single("image"), async (req, res) => {
     })
   } catch (error) {
     console.error("❌ Upload image error:", error)
-    console.error("❌ Error stack:", error.stack)
 
-    // Handle specific Cloudinary errors
     if (error.message && error.message.includes("Invalid image file")) {
       return res.status(415).json({
         success: false,
@@ -815,19 +844,10 @@ router.post("/upload-image", fileUpload.single("image"), async (req, res) => {
       })
     }
 
-    if (error.message && error.message.includes("Cloudinary")) {
-      return res.status(502).json({
-        success: false,
-        error: "Image upload service temporarily unavailable",
-        details: process.env.NODE_ENV === "development" ? error.message : "Please try again later",
-      })
-    }
-
     res.status(500).json({
       success: false,
       error: "Failed to upload image",
       details: process.env.NODE_ENV === "development" ? error.message : "Internal server error",
-      stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
     })
   }
 })
@@ -845,14 +865,12 @@ router.delete("/delete-image", async (req, res) => {
     }
 
     console.log("🗑️ Deleting image:", imageUrl)
-
     const publicId = getPublicIdFromUrl(imageUrl)
     if (publicId) {
       await deleteImage(`yesp-products/${publicId}`)
     }
 
     console.log("✅ Image deleted successfully")
-
     res.json({
       success: true,
       message: "Image deleted successfully",

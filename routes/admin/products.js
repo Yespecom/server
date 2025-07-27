@@ -86,23 +86,26 @@ const parseVariants = (variants, hasVariants, trackQuantity) => {
       return []
     }
 
+    // Parse trackQuantity properly
+    const shouldTrackQuantity = trackQuantity === "true" || trackQuantity === true || trackQuantity === 1
+    console.log("📝 Should track quantity:", shouldTrackQuantity)
+
     // Validate and process each variant
     const processedVariants = parsedVariants.map((variant, index) => {
       console.log(`🔄 Processing variant ${index + 1}:`, variant)
 
       // Validate required fields (stock is optional if not tracking quantity)
       const requiredFields = ["name", "price", "sku"]
-
-      // Only require stock if trackQuantity is true
-      if (trackQuantity === true || trackQuantity === "true") {
+      if (shouldTrackQuantity) {
         requiredFields.push("stock")
       }
 
       const missingFields = requiredFields.filter((field) => {
-        if (field === "stock" && (trackQuantity === false || trackQuantity === "false")) {
-          return false // Don't require stock if tracking is disabled
+        const value = variant[field]
+        if (field === "stock" && !shouldTrackQuantity) {
+          return false // Don't require stock if not tracking
         }
-        return !variant[field] && variant[field] !== "0"
+        return !value && value !== "0" && value !== 0
       })
 
       if (missingFields.length > 0) {
@@ -134,10 +137,9 @@ const parseVariants = (variants, hasVariants, trackQuantity) => {
       }
 
       // FIXED: Only include stock if quantity tracking is enabled
-      if (trackQuantity === true || trackQuantity === "true") {
+      if (shouldTrackQuantity) {
         if (variant.stock === undefined || variant.stock === null || variant.stock === "") {
-          // Set default stock to 0 if tracking is enabled but no stock provided
-          processedVariant.stock = "0"
+          processedVariant.stock = "0" // Default to 0
         } else {
           const stock = Number.parseInt(variant.stock)
           if (isNaN(stock) || stock < 0) {
@@ -146,7 +148,6 @@ const parseVariants = (variants, hasVariants, trackQuantity) => {
           processedVariant.stock = stock.toString()
         }
       }
-      // If trackQuantity is false, don't include stock field at all
 
       // Only include _id if it's a valid ObjectId (not temp ID)
       if (
@@ -616,7 +617,7 @@ router.post("/", fileUpload.array("images", 10), async (req, res) => {
   }
 })
 
-// FIXED: Update product with proper trackQuantity handling
+// ENHANCED: Update product with better error handling and logging
 router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
   try {
     console.log("📝 Updating product:", req.params.id)
@@ -693,8 +694,14 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
     const isVariantProduct = hasVariants === "true" || hasVariants === true
 
     try {
-      parsedVariants = parseVariants(variants, isVariantProduct, shouldTrackQuantity)
-      console.log("🔄 Updated variants:", parsedVariants.length)
+      if (isVariantProduct) {
+        parsedVariants = parseVariants(variants, isVariantProduct, shouldTrackQuantity)
+        console.log("🔄 Updated variants:", parsedVariants.length)
+      } else {
+        // FIXED: Ensure variants array is empty when hasVariants is false
+        parsedVariants = []
+        console.log("🔄 Variants disabled, clearing variants array")
+      }
     } catch (variantError) {
       console.error("❌ Variant parsing error:", variantError)
       return res.status(400).json({
@@ -765,8 +772,8 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
       metaDescription: metaDescription?.trim() || product.metaDescription,
       offer: parseOfferField(offer),
       hasVariants: isVariantProduct,
-      variants: parsedVariants,
-      trackQuantity: shouldTrackQuantity, // NEW: Update quantity tracking
+      variants: parsedVariants, // This will be [] when hasVariants is false
+      trackQuantity: shouldTrackQuantity,
     }
 
     // FIXED: Handle stock field based on trackQuantity
@@ -783,7 +790,7 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
         }
       }
     } else {
-      // If quantity tracking is disabled, remove stock field
+      // If quantity tracking is disabled, we need to unset the stock field
       updateData.$unset = { stock: 1 }
     }
 
@@ -820,26 +827,40 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
     })
   } catch (error) {
     console.error("❌ Update product error:", error)
+    console.error("❌ Error stack:", error.stack)
 
+    // Enhanced error handling with more details
     if (error.name === "ValidationError") {
       const errors = Object.keys(error.errors).map((key) => ({
         field: key,
         message: error.errors[key].message,
         value: error.errors[key].value,
+        kind: error.errors[key].kind,
+        path: error.errors[key].path,
       }))
-      console.error("❌ Validation errors:", errors)
+      console.error("❌ Detailed validation errors:", errors)
       return res.status(400).json({
         success: false,
         error: "Validation failed",
         details: errors,
+        debugInfo: {
+          errorName: error.name,
+          errorMessage: error.message,
+        },
       })
     }
 
     if (error.code === 11000) {
+      console.error("❌ Duplicate key error:", error.keyPattern, error.keyValue)
       return res.status(400).json({
         success: false,
         error: "Duplicate value",
         details: "SKU or slug already exists",
+        debugInfo: {
+          errorCode: error.code,
+          keyPattern: error.keyPattern,
+          keyValue: error.keyValue,
+        },
       })
     }
 
@@ -847,6 +868,10 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
       success: false,
       error: "Failed to update product",
       details: error.message,
+      debugInfo: {
+        errorName: error.name,
+        stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
+      },
     })
   }
 })

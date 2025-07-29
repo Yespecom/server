@@ -12,10 +12,8 @@ const authenticateCustomer = async (req, res, next) => {
         code: "NO_TOKEN",
       })
     }
-
     const token = authHeader.replace("Bearer ", "")
     let decoded
-
     try {
       decoded = AuthUtils.verifyToken(token)
     } catch (tokenError) {
@@ -25,7 +23,6 @@ const authenticateCustomer = async (req, res, next) => {
           code: "TOKEN_EXPIRED",
         })
       }
-
       return res.status(401).json({
         error: "Invalid session. Please login again.",
         code: "TOKEN_INVALID",
@@ -56,7 +53,6 @@ const authenticateCustomer = async (req, res, next) => {
 
     const Customer = require("../../models/tenant/Customer")(req.tenantDB)
     const customer = await Customer.findById(decoded.customerId)
-
     if (!customer) {
       return res.status(401).json({
         error: "Customer not found",
@@ -99,17 +95,16 @@ router.get("/test", (req, res) => {
 // Create new order
 router.post("/", authenticateCustomer, async (req, res) => {
   try {
-    const { items, shippingAddress, paymentMethod, notes, couponCode } = req.body;
-    const customer = req.customer;
-
-    console.log(`📦 Creating order for customer: ${customer.email}`);
+    const { items, shippingAddress, paymentMethod, notes, couponCode } = req.body
+    const customer = req.customer
+    console.log(`📦 Creating order for customer: ${customer.email}`)
 
     // Step 1: Validate items
     if (!items || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({
         error: "Order items are required",
         code: "MISSING_ITEMS",
-      });
+      })
     }
 
     // Step 2: Validate shipping address
@@ -117,54 +112,58 @@ router.post("/", authenticateCustomer, async (req, res) => {
       return res.status(400).json({
         error: "Shipping address is required",
         code: "MISSING_ADDRESS",
-      });
+      })
     }
 
-    const requiredFields = ["name", "street", "city", "state", "zipCode"];
-    const missingFields = requiredFields.filter(f => !shippingAddress[f]);
-
+    const requiredFields = ["name", "street", "city", "state", "zipCode"]
+    const missingFields = requiredFields.filter((f) => !shippingAddress[f])
     if (missingFields.length > 0) {
       return res.status(400).json({
         error: "Incomplete shipping address",
         missingFields,
         code: "INCOMPLETE_ADDRESS",
-      });
+      })
     }
 
     // Step 3: Get Models
-    const Order = require("../../models/tenant/Order")(req.tenantDB);
-    const Product = require("../../models/tenant/Product")(req.tenantDB);
+    const Order = require("../../models/tenant/Order")(req.tenantDB)
+    const Product = require("../../models/tenant/Product")(req.tenantDB)
 
     // Step 4: Validate products and compute totals
-    let subtotal = 0;
-    const orderItems = [];
+    let subtotal = 0
+    const orderItems = []
 
     for (const item of items) {
       if (!item.productId || !item.quantity || item.quantity <= 0) {
         return res.status(400).json({
           error: "Each item must have a valid productId and quantity",
           code: "INVALID_ITEM_DATA",
-        });
+        })
       }
 
-      const product = await Product.findById(item.productId);
+      const product = await Product.findById(item.productId)
       if (!product || !product.isActive) {
         return res.status(400).json({
           error: `Product not found or inactive: ${item.productId}`,
           code: "INVALID_PRODUCT",
-        });
+        })
       }
 
-      if (!product.isAvailable(item.quantity)) {
-        return res.status(400).json({
-          error: `Insufficient stock for: ${product.name}`,
-          code: "INSUFFICIENT_STOCK",
-          availableQuantity: product.inventory?.trackQuantity ? product.inventory.quantity : "unlimited",
-        });
+      // 🚨 FIXED: Replace isAvailable() with proper stock check
+      // Check if product has inventory tracking and sufficient stock
+      if (product.inventory && product.inventory.trackQuantity) {
+        if (product.inventory.quantity < item.quantity) {
+          return res.status(400).json({
+            error: `Insufficient stock for: ${product.name}`,
+            code: "INSUFFICIENT_STOCK",
+            availableQuantity: product.inventory.quantity,
+          })
+        }
       }
+      // If no inventory tracking, assume product is available
 
-      const itemTotal = product.price * item.quantity;
-      subtotal += itemTotal;
+      const itemTotal = product.price * item.quantity
+      subtotal += itemTotal
 
       orderItems.push({
         productId: product._id,
@@ -172,7 +171,7 @@ router.post("/", authenticateCustomer, async (req, res) => {
         price: product.price,
         quantity: item.quantity,
         total: itemTotal,
-      });
+      })
     }
 
     // Step 5: Create Order
@@ -198,32 +197,29 @@ router.post("/", authenticateCustomer, async (req, res) => {
       total: subtotal,
       paymentMethod: paymentMethod || "cod",
       notes,
-    });
+    })
 
-    await newOrder.save(); // auto-generates orderNumber in pre("save") hook
+    await newOrder.save() // auto-generates orderNumber in pre("save") hook
 
     return res.status(201).json({
       message: "Order created successfully",
       order: newOrder,
-    });
-
+    })
   } catch (error) {
-    console.error("❌ Create order error:", error);
+    console.error("❌ Create order error:", error)
     return res.status(500).json({
       error: "Failed to create order",
       details: error.message,
       code: "ORDER_CREATION_ERROR",
-    });
+    })
   }
-});
-
+})
 
 // Get customer orders
 router.get("/", authenticateCustomer, async (req, res) => {
   try {
     const customer = req.customer
     const { page = 1, limit = 10, status, sortBy = "createdAt", sortOrder = "desc" } = req.query
-
     console.log(`📋 Getting orders for customer: ${customer.email}`)
 
     const Order = require("../../models/tenant/Order")(req.tenantDB)
@@ -293,7 +289,6 @@ router.get("/:orderId", authenticateCustomer, async (req, res) => {
   try {
     const { orderId } = req.params
     const customer = req.customer
-
     console.log(`📋 Getting order details: ${orderId}`)
 
     const Order = require("../../models/tenant/Order")(req.tenantDB)
@@ -327,14 +322,12 @@ router.get("/:orderId", authenticateCustomer, async (req, res) => {
     })
   } catch (error) {
     console.error("❌ Get order details error:", error)
-
     if (error.name === "CastError") {
       return res.status(400).json({
         error: "Invalid order ID format",
         code: "INVALID_ORDER_ID",
       })
     }
-
     res.status(500).json({
       error: "Failed to get order details",
       details: error.message,
@@ -349,7 +342,6 @@ router.put("/:orderId/cancel", authenticateCustomer, async (req, res) => {
     const { orderId } = req.params
     const { reason } = req.body
     const customer = req.customer
-
     console.log(`❌ Cancelling order: ${orderId}`)
 
     const Order = require("../../models/tenant/Order")(req.tenantDB)
@@ -424,7 +416,6 @@ router.get("/:orderId/track", authenticateCustomer, async (req, res) => {
   try {
     const { orderId } = req.params
     const customer = req.customer
-
     console.log(`🚚 Tracking order: ${orderId}`)
 
     const Order = require("../../models/tenant/Order")(req.tenantDB)
@@ -523,7 +514,6 @@ router.get("/:orderId/invoice", authenticateCustomer, async (req, res) => {
   try {
     const { orderId } = req.params
     const customer = req.customer
-
     console.log(`🧾 Getting invoice for order: ${orderId}`)
 
     const Order = require("../../models/tenant/Order")(req.tenantDB)
@@ -599,7 +589,6 @@ router.post("/:orderId/reorder", authenticateCustomer, async (req, res) => {
     const { orderId } = req.params
     const { shippingAddress } = req.body
     const customer = req.customer
-
     console.log(`🔄 Reordering from order: ${orderId}`)
 
     const Order = require("../../models/tenant/Order")(req.tenantDB)
@@ -623,23 +612,31 @@ router.post("/:orderId/reorder", authenticateCustomer, async (req, res) => {
 
     for (const item of originalOrder.items) {
       const product = await Product.findById(item.productId)
-
       if (!product || !product.isActive) {
         unavailableItems.push({
           name: item.name,
           reason: "Product no longer available",
         })
-      } else if (!product.isAvailable(item.quantity)) {
-        unavailableItems.push({
-          name: item.name,
-          reason: "Insufficient stock",
-          availableQuantity: product.inventory?.trackQuantity ? product.inventory.quantity : "unlimited",
-        })
       } else {
-        availableItems.push({
-          productId: item.productId,
-          quantity: item.quantity,
-        })
+        // 🚨 FIXED: Replace isAvailable() with proper stock check
+        let isAvailable = true
+        if (product.inventory && product.inventory.trackQuantity) {
+          if (product.inventory.quantity < item.quantity) {
+            isAvailable = false
+            unavailableItems.push({
+              name: item.name,
+              reason: "Insufficient stock",
+              availableQuantity: product.inventory.quantity,
+            })
+          }
+        }
+
+        if (isAvailable) {
+          availableItems.push({
+            productId: item.productId,
+            quantity: item.quantity,
+          })
+        }
       }
     }
 

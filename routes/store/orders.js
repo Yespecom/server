@@ -1,6 +1,7 @@
 const express = require("express")
 const router = express.Router({ mergeParams: true })
 const AuthUtils = require("../../utils/auth")
+const crypto = require("crypto") // For Razorpay signature verification
 
 // Customer authentication middleware
 const authenticateCustomer = async (req, res, next) => {
@@ -12,8 +13,10 @@ const authenticateCustomer = async (req, res, next) => {
         code: "NO_TOKEN",
       })
     }
+
     const token = authHeader.replace("Bearer ", "")
     let decoded
+
     try {
       decoded = AuthUtils.verifyToken(token)
     } catch (tokenError) {
@@ -53,6 +56,7 @@ const authenticateCustomer = async (req, res, next) => {
 
     const Customer = require("../../models/tenant/Customer")(req.tenantDB)
     const customer = await Customer.findById(decoded.customerId)
+
     if (!customer) {
       return res.status(401).json({
         error: "Customer not found",
@@ -81,6 +85,19 @@ const authenticateCustomer = async (req, res, next) => {
   }
 }
 
+// Razorpay signature verification helper
+const verifyRazorpaySignature = (orderId, paymentId, signature, secret) => {
+  try {
+    const body = orderId + "|" + paymentId
+    const expectedSignature = crypto.createHmac("sha256", secret).update(body.toString()).digest("hex")
+
+    return expectedSignature === signature
+  } catch (error) {
+    console.error("❌ Razorpay signature verification error:", error)
+    return false
+  }
+}
+
 // Test endpoint
 router.get("/test", (req, res) => {
   res.json({
@@ -95,9 +112,22 @@ router.get("/test", (req, res) => {
 // Create new order
 router.post("/", authenticateCustomer, async (req, res) => {
   try {
-    const { items, shippingAddress, paymentMethod, notes, couponCode } = req.body
+    const {
+      items,
+      shippingAddress,
+      paymentMethod,
+      paymentStatus,
+      notes,
+      couponCode,
+      // Razorpay payment data
+      razorpayPaymentId,
+      razorpayOrderId,
+      razorpaySignature,
+    } = req.body
+
     const customer = req.customer
     console.log(`📦 Creating order for customer: ${customer.email}`)
+    console.log(`💳 Payment method: ${paymentMethod}, Payment status: ${paymentStatus}`)
 
     // Step 1: Validate items
     if (!items || !Array.isArray(items) || items.length === 0) {
@@ -125,11 +155,66 @@ router.post("/", authenticateCustomer, async (req, res) => {
       })
     }
 
-    // Step 3: Get Models
+    // Step 3: Validate payment method and status
+    const validPaymentMethods = ["online", "cod"]
+    if (!validPaymentMethods.includes(paymentMethod)) {
+      return res.status(400).json({
+        error: "Invalid payment method",
+        code: "INVALID_PAYMENT_METHOD",
+      })
+    }
+
+    // Step 4: Verify Razorpay payment if online payment
+    let finalPaymentStatus = paymentStatus || "pending"
+    let paymentDetails = {}
+
+    if (paymentMethod === "online") {
+      if (!razorpayPaymentId || !razorpayOrderId || !razorpaySignature) {
+        return res.status(400).json({
+          error: "Razorpay payment details are required for online payments",
+          code: "MISSING_PAYMENT_DETAILS",
+        })
+      }
+
+      // Get Razorpay secret from environment or settings
+      const razorpaySecret = process.env.RAZORPAY_KEY_SECRET || "your_razorpay_secret"
+
+      // Verify Razorpay signature
+      const isValidSignature = verifyRazorpaySignature(
+        razorpayOrderId,
+        razorpayPaymentId,
+        razorpaySignature,
+        razorpaySecret,
+      )
+
+      if (!isValidSignature) {
+        console.error("❌ Invalid Razorpay signature")
+        return res.status(400).json({
+          error: "Payment verification failed",
+          code: "PAYMENT_VERIFICATION_FAILED",
+        })
+      }
+
+      // Payment verified successfully
+      finalPaymentStatus = "paid"
+      paymentDetails = {
+        razorpayPaymentId,
+        razorpayOrderId,
+        razorpaySignature,
+        verifiedAt: new Date(),
+      }
+
+      console.log("✅ Razorpay payment verified successfully")
+    } else if (paymentMethod === "cod") {
+      // COD orders should have pending payment status
+      finalPaymentStatus = "pending"
+    }
+
+    // Step 5: Get Models
     const Order = require("../../models/tenant/Order")(req.tenantDB)
     const Product = require("../../models/tenant/Product")(req.tenantDB)
 
-    // Step 4: Validate products and compute totals
+    // Step 6: Validate products and compute totals
     let subtotal = 0
     const orderItems = []
 
@@ -149,8 +234,7 @@ router.post("/", authenticateCustomer, async (req, res) => {
         })
       }
 
-      // 🚨 FIXED: Replace isAvailable() with proper stock check
-      // Check if product has inventory tracking and sufficient stock
+      // Check stock availability
       if (product.inventory && product.inventory.trackQuantity) {
         if (product.inventory.quantity < item.quantity) {
           return res.status(400).json({
@@ -160,7 +244,6 @@ router.post("/", authenticateCustomer, async (req, res) => {
           })
         }
       }
-      // If no inventory tracking, assume product is available
 
       const itemTotal = product.price * item.quantity
       subtotal += itemTotal
@@ -172,10 +255,25 @@ router.post("/", authenticateCustomer, async (req, res) => {
         quantity: item.quantity,
         total: itemTotal,
       })
+
+      // Update product stock and sales count for paid orders
+      if (finalPaymentStatus === "paid") {
+        if (product.inventory && product.inventory.trackQuantity) {
+          product.inventory.quantity -= item.quantity
+        }
+        product.salesCount = (product.salesCount || 0) + item.quantity
+        await product.save()
+      }
     }
 
-    // Step 5: Create Order
-    const newOrder = new Order({
+    // Step 7: Calculate totals
+    const tax = subtotal * 0.18 // 18% GST
+    const shipping = 0 // Free shipping
+    const discount = 0 // No discount for now
+    const total = subtotal + tax + shipping - discount
+
+    // Step 8: Create Order
+    const orderData = {
       customerId: customer._id,
       customerInfo: {
         name: shippingAddress.name,
@@ -191,23 +289,48 @@ router.post("/", authenticateCustomer, async (req, res) => {
       },
       items: orderItems,
       subtotal,
-      tax: 0,
-      shipping: 0,
-      discount: 0,
-      total: subtotal,
-      paymentMethod: paymentMethod || "cod",
+      tax,
+      shipping,
+      discount,
+      total,
+      paymentMethod,
+      paymentStatus: finalPaymentStatus, // ✅ Set the correct payment status
       notes,
-    })
+      // Add payment details for online payments
+      ...(paymentMethod === "online" && { paymentDetails }),
+    }
 
+    const newOrder = new Order(orderData)
     await newOrder.save() // auto-generates orderNumber in pre("save") hook
 
+    console.log(`✅ Order created successfully: ${newOrder.orderNumber} with payment status: ${finalPaymentStatus}`)
+
     return res.status(201).json({
+      success: true,
       message: "Order created successfully",
-      order: newOrder,
+      order: {
+        _id: newOrder._id,
+        orderNumber: newOrder.orderNumber,
+        status: newOrder.status,
+        paymentStatus: newOrder.paymentStatus,
+        paymentMethod: newOrder.paymentMethod,
+        total: newOrder.total,
+        items: newOrder.items,
+        customerInfo: newOrder.customerInfo,
+        createdAt: newOrder.createdAt,
+        ...(paymentMethod === "online" && {
+          paymentDetails: {
+            razorpayPaymentId,
+            razorpayOrderId,
+            verified: true,
+          },
+        }),
+      },
     })
   } catch (error) {
     console.error("❌ Create order error:", error)
     return res.status(500).json({
+      success: false,
       error: "Failed to create order",
       details: error.message,
       code: "ORDER_CREATION_ERROR",
@@ -220,6 +343,7 @@ router.get("/", authenticateCustomer, async (req, res) => {
   try {
     const customer = req.customer
     const { page = 1, limit = 10, status, sortBy = "createdAt", sortOrder = "desc" } = req.query
+
     console.log(`📋 Getting orders for customer: ${customer.email}`)
 
     const Order = require("../../models/tenant/Order")(req.tenantDB)
@@ -258,6 +382,7 @@ router.get("/", authenticateCustomer, async (req, res) => {
     console.log(`✅ Found ${orders.length} orders for customer: ${customer.email}`)
 
     res.json({
+      success: true,
       message: "Orders retrieved successfully",
       orders,
       pagination: {
@@ -277,6 +402,7 @@ router.get("/", authenticateCustomer, async (req, res) => {
   } catch (error) {
     console.error("❌ Get orders error:", error)
     res.status(500).json({
+      success: false,
       error: "Failed to get orders",
       details: error.message,
       code: "GET_ORDERS_ERROR",
@@ -289,6 +415,7 @@ router.get("/:orderId", authenticateCustomer, async (req, res) => {
   try {
     const { orderId } = req.params
     const customer = req.customer
+
     console.log(`📋 Getting order details: ${orderId}`)
 
     const Order = require("../../models/tenant/Order")(req.tenantDB)
@@ -309,6 +436,7 @@ router.get("/:orderId", authenticateCustomer, async (req, res) => {
 
     if (!order) {
       return res.status(404).json({
+        success: false,
         error: "Order not found",
         code: "ORDER_NOT_FOUND",
       })
@@ -317,6 +445,7 @@ router.get("/:orderId", authenticateCustomer, async (req, res) => {
     console.log(`✅ Order details retrieved: ${order.orderNumber}`)
 
     res.json({
+      success: true,
       message: "Order details retrieved successfully",
       order,
     })
@@ -324,11 +453,13 @@ router.get("/:orderId", authenticateCustomer, async (req, res) => {
     console.error("❌ Get order details error:", error)
     if (error.name === "CastError") {
       return res.status(400).json({
+        success: false,
         error: "Invalid order ID format",
         code: "INVALID_ORDER_ID",
       })
     }
     res.status(500).json({
+      success: false,
       error: "Failed to get order details",
       details: error.message,
       code: "ORDER_DETAILS_ERROR",
@@ -342,6 +473,7 @@ router.put("/:orderId/cancel", authenticateCustomer, async (req, res) => {
     const { orderId } = req.params
     const { reason } = req.body
     const customer = req.customer
+
     console.log(`❌ Cancelling order: ${orderId}`)
 
     const Order = require("../../models/tenant/Order")(req.tenantDB)
@@ -354,6 +486,7 @@ router.put("/:orderId/cancel", authenticateCustomer, async (req, res) => {
 
     if (!order) {
       return res.status(404).json({
+        success: false,
         error: "Order not found",
         code: "ORDER_NOT_FOUND",
       })
@@ -362,6 +495,7 @@ router.put("/:orderId/cancel", authenticateCustomer, async (req, res) => {
     // Check if order can be cancelled
     if (order.status === "cancelled") {
       return res.status(400).json({
+        success: false,
         error: "Order is already cancelled",
         code: "ORDER_ALREADY_CANCELLED",
       })
@@ -369,6 +503,7 @@ router.put("/:orderId/cancel", authenticateCustomer, async (req, res) => {
 
     if (order.status === "shipped" || order.status === "delivered") {
       return res.status(400).json({
+        success: false,
         error: "Cannot cancel shipped or delivered orders",
         code: "ORDER_CANNOT_BE_CANCELLED",
       })
@@ -378,8 +513,10 @@ router.put("/:orderId/cancel", authenticateCustomer, async (req, res) => {
     for (const item of order.items) {
       const product = await Product.findById(item.productId)
       if (product) {
-        product.updateStock(item.quantity, "add")
-        product.salesCount = Math.max(0, product.salesCount - item.quantity)
+        if (product.inventory && product.inventory.trackQuantity) {
+          product.inventory.quantity += item.quantity
+        }
+        product.salesCount = Math.max(0, (product.salesCount || 0) - item.quantity)
         await product.save()
       }
     }
@@ -392,6 +529,7 @@ router.put("/:orderId/cancel", authenticateCustomer, async (req, res) => {
     console.log(`✅ Order cancelled: ${order.orderNumber}`)
 
     res.json({
+      success: true,
       message: "Order cancelled successfully",
       order: {
         id: order._id,
@@ -404,6 +542,7 @@ router.put("/:orderId/cancel", authenticateCustomer, async (req, res) => {
   } catch (error) {
     console.error("❌ Cancel order error:", error)
     res.status(500).json({
+      success: false,
       error: "Failed to cancel order",
       details: error.message,
       code: "ORDER_CANCELLATION_ERROR",
@@ -416,6 +555,7 @@ router.get("/:orderId/track", authenticateCustomer, async (req, res) => {
   try {
     const { orderId } = req.params
     const customer = req.customer
+
     console.log(`🚚 Tracking order: ${orderId}`)
 
     const Order = require("../../models/tenant/Order")(req.tenantDB)
@@ -427,6 +567,7 @@ router.get("/:orderId/track", authenticateCustomer, async (req, res) => {
 
     if (!order) {
       return res.status(404).json({
+        success: false,
         error: "Order not found",
         code: "ORDER_NOT_FOUND",
       })
@@ -486,6 +627,7 @@ router.get("/:orderId/track", authenticateCustomer, async (req, res) => {
     console.log(`✅ Order tracking retrieved: ${order.orderNumber}`)
 
     res.json({
+      success: true,
       message: "Order tracking retrieved successfully",
       order: {
         id: order._id,
@@ -502,6 +644,7 @@ router.get("/:orderId/track", authenticateCustomer, async (req, res) => {
   } catch (error) {
     console.error("❌ Track order error:", error)
     res.status(500).json({
+      success: false,
       error: "Failed to track order",
       details: error.message,
       code: "ORDER_TRACKING_ERROR",
@@ -514,6 +657,7 @@ router.get("/:orderId/invoice", authenticateCustomer, async (req, res) => {
   try {
     const { orderId } = req.params
     const customer = req.customer
+
     console.log(`🧾 Getting invoice for order: ${orderId}`)
 
     const Order = require("../../models/tenant/Order")(req.tenantDB)
@@ -526,6 +670,7 @@ router.get("/:orderId/invoice", authenticateCustomer, async (req, res) => {
 
     if (!order) {
       return res.status(404).json({
+        success: false,
         error: "Order not found",
         code: "ORDER_NOT_FOUND",
       })
@@ -570,12 +715,14 @@ router.get("/:orderId/invoice", authenticateCustomer, async (req, res) => {
     console.log(`✅ Invoice retrieved for order: ${order.orderNumber}`)
 
     res.json({
+      success: true,
       message: "Invoice retrieved successfully",
       invoice,
     })
   } catch (error) {
     console.error("❌ Get invoice error:", error)
     res.status(500).json({
+      success: false,
       error: "Failed to get invoice",
       details: error.message,
       code: "INVOICE_ERROR",
@@ -589,6 +736,7 @@ router.post("/:orderId/reorder", authenticateCustomer, async (req, res) => {
     const { orderId } = req.params
     const { shippingAddress } = req.body
     const customer = req.customer
+
     console.log(`🔄 Reordering from order: ${orderId}`)
 
     const Order = require("../../models/tenant/Order")(req.tenantDB)
@@ -601,6 +749,7 @@ router.post("/:orderId/reorder", authenticateCustomer, async (req, res) => {
 
     if (!originalOrder) {
       return res.status(404).json({
+        success: false,
         error: "Original order not found",
         code: "ORDER_NOT_FOUND",
       })
@@ -618,7 +767,7 @@ router.post("/:orderId/reorder", authenticateCustomer, async (req, res) => {
           reason: "Product no longer available",
         })
       } else {
-        // 🚨 FIXED: Replace isAvailable() with proper stock check
+        // Check stock availability
         let isAvailable = true
         if (product.inventory && product.inventory.trackQuantity) {
           if (product.inventory.quantity < item.quantity) {
@@ -642,6 +791,7 @@ router.post("/:orderId/reorder", authenticateCustomer, async (req, res) => {
 
     if (availableItems.length === 0) {
       return res.status(400).json({
+        success: false,
         error: "No items from the original order are available for reorder",
         unavailableItems,
         code: "NO_ITEMS_AVAILABLE",
@@ -662,6 +812,7 @@ router.post("/:orderId/reorder", authenticateCustomer, async (req, res) => {
   } catch (error) {
     console.error("❌ Reorder error:", error)
     res.status(500).json({
+      success: false,
       error: "Failed to reorder",
       details: error.message,
       code: "REORDER_ERROR",

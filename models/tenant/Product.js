@@ -212,18 +212,50 @@ module.exports = (tenantDB) => {
         min: [0, "Original price cannot be negative"],
         validate: {
           validator: function (v) {
-            // If v is null or undefined, or if hasVariants is true, validation passes.
-            // This allows originalPrice to be optional or not applicable for variants.
-            console.log("🔍 Mongoose originalPrice validator:", {
-              v,
-              thisPrice: this.price,
-              hasVariants: this.hasVariants,
+            // In findByIdAndUpdate, 'this' refers to the update object.
+            // We need to get the 'price' and 'hasVariants' from the update object if present,
+            // otherwise from the original document (which Mongoose might not provide directly here).
+            // The API route should ensure 'price' and 'hasVariants' are always in the update payload.
+            const currentPrice = this.price // This should now be set by the API route
+            const currentHasVariants = this.hasVariants // This should now be set by the API route
+
+            console.log("🔍 Mongoose originalPrice validator (inside schema):", {
+              v, // The value of originalPrice being validated
+              currentPrice, // The value of price on the update object
+              currentHasVariants, // The value of hasVariants on the update object
             })
-            if (v === null || v === undefined || this.hasVariants) return true
+
+            // If v is null or undefined, or if currentHasVariants is true, validation passes.
+            if (v === null || v === undefined || currentHasVariants === true) return true
+
+            // If it's a non-variant product and originalPrice is provided,
+            // currentPrice must be a valid number for comparison.
+            if (typeof currentPrice !== "number" || isNaN(currentPrice)) {
+              // This case should ideally not be hit if the API route correctly sets `price`
+              // in the updateData. If it is, it means the selling price is missing or invalid.
+              return false // Cannot validate originalPrice without a valid selling price
+            }
+
             // Otherwise, originalPrice must be a number greater than selling price.
-            return v > this.price
+            return v > currentPrice
           },
-          message: "Original price must be greater than selling price",
+          message: function (props) {
+            console.log("🔍 Mongoose originalPrice validator failed props (inside schema):", props)
+            const currentPrice = this.price
+            const currentHasVariants = this.hasVariants
+
+            if (currentHasVariants === true) {
+              return "Original price is not applicable for variant products."
+            }
+            if (
+              props.value !== null &&
+              props.value !== undefined &&
+              (typeof currentPrice !== "number" || isNaN(currentPrice))
+            ) {
+              return "Selling price must be a valid number to compare with original price."
+            }
+            return "Original price must be greater than selling price"
+          },
         },
       },
       taxPercentage: {
@@ -590,21 +622,80 @@ module.exports = (tenantDB) => {
   productSchema.pre(["findOneAndUpdate", "updateOne", "updateMany"], function (next) {
     try {
       const update = this.getUpdate()
+      // Get the effective hasVariants and trackQuantity from the update object or the existing document
+      const effectiveHasVariants =
+        update.hasVariants !== undefined
+          ? update.hasVariants === true || update.hasVariants === "true"
+          : this.hasVariants
+      const effectiveTrackQuantity =
+        update.trackQuantity !== undefined
+          ? update.trackQuantity === true || update.trackQuantity === "true"
+          : this.trackQuantity
+
       console.log("🔍 PRE-UPDATE: Processing update operation:", {
-        hasVariants: update.hasVariants,
+        updateHasVariants: update.hasVariants,
+        effectiveHasVariants,
+        updateTrackQuantity: update.trackQuantity,
+        effectiveTrackQuantity,
         variantsLength: update.variants ? update.variants.length : 0,
-        trackQuantity: update.trackQuantity,
       })
+
       // Handle variants validation for update operations
-      if (update.hasVariants === true || update.hasVariants === "true") {
+      if (effectiveHasVariants === true) {
         if (!update.variants || update.variants.length === 0) {
           return next(new Error("At least one variant is required when hasVariants is true"))
         }
-      } else if (update.hasVariants === false || update.hasVariants === "false") {
+        // If variants are being updated, ensure their stock is valid if tracking quantity
+        if (effectiveTrackQuantity === true) {
+          for (const variant of update.variants) {
+            if (variant.stock === undefined || variant.stock === null || variant.stock === "") {
+              return next(new Error(`Variant "${variant.name}" requires stock when quantity tracking is enabled`))
+            }
+          }
+        }
+      } else if (effectiveHasVariants === false) {
+        // If hasVariants is explicitly set to false, ensure variants array is empty
         if (update.variants && update.variants.length > 0) {
-          return next(new Error("Variants should be empty when hasVariants is false"))
+          // Clear variants if hasVariants is set to false
+          update.variants = []
+          this.setUpdate(update) // Update the internal update object
+          console.log("📝 PRE-UPDATE: Cleared variants array because hasVariants is false.")
         }
       }
+
+      // Handle main product stock logic based on effectiveTrackQuantity and effectiveHasVariants
+      if (effectiveTrackQuantity === true && effectiveHasVariants === false) {
+        // For non-variant products with quantity tracking enabled
+        if (update.stock === undefined || update.stock === null || update.stock === "") {
+          // If stock is not provided in update, set it to 0 or keep existing if it's a number
+          const currentStock = this.stock // Get existing stock from the document
+          if (typeof currentStock !== "number" || isNaN(currentStock)) {
+            update.stock = 0
+          } else {
+            update.stock = currentStock
+          }
+          this.setUpdate(update)
+          console.log(
+            "📝 PRE-UPDATE: Set main product stock to default/existing value for non-variant, tracked product.",
+          )
+        }
+      } else if (effectiveTrackQuantity === false) {
+        // If quantity tracking is disabled, ensure stock is unset for the main product
+        if (update.stock !== undefined) {
+          update.$unset = { ...update.$unset, stock: 1 }
+          delete update.stock // Remove stock from $set if it was there
+          this.setUpdate(update)
+          console.log("📝 PRE-UPDATE: Unset main product stock because quantity tracking is disabled.")
+        }
+      } else if (effectiveHasVariants === true) {
+        // If hasVariants is true, ensure main product stock is 0 or unset
+        if (update.stock !== undefined) {
+          update.stock = 0
+          this.setUpdate(update)
+          console.log("📝 PRE-UPDATE: Set main product stock to 0 because hasVariants is true.")
+        }
+      }
+
       next()
     } catch (error) {
       next(error)

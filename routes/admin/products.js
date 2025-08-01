@@ -793,6 +793,8 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
       hasStock: "stock" in updateData,
       stockValue: updateData.stock,
       hasUnset: "$unset" in updateData,
+      updateDataPrice: updateData.price, // Added for debugging
+      updateDataOriginalPrice: updateData.originalPrice, // Added for debugging
     })
 
     // CRITICAL: Log the exact variants being sent to MongoDB

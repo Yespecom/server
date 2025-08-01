@@ -66,7 +66,7 @@ module.exports = (tenantDB) => {
         type: String,
         validate: {
           validator: (v) => {
-            if (!v) return true // Optional field
+            if (!v) return true // Optional field: allows null, undefined, empty string, 0
             const price = Number.parseFloat(v)
             return !isNaN(price) && price >= 0
           },
@@ -212,7 +212,10 @@ module.exports = (tenantDB) => {
         min: [0, "Original price cannot be negative"],
         validate: {
           validator: function (v) {
-            if (!v || this.hasVariants) return true
+            // If v is null or undefined, or if hasVariants is true, validation passes.
+            // This allows originalPrice to be optional or not applicable for variants.
+            if (v === null || v === undefined || this.hasVariants) return true
+            // Otherwise, originalPrice must be a number greater than selling price.
             return v > this.price
           },
           message: "Original price must be greater than selling price",

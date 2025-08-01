@@ -214,6 +214,11 @@ module.exports = (tenantDB) => {
           validator: function (v) {
             // If v is null or undefined, or if hasVariants is true, validation passes.
             // This allows originalPrice to be optional or not applicable for variants.
+            console.log("🔍 Mongoose originalPrice validator:", {
+              v,
+              thisPrice: this.price,
+              hasVariants: this.hasVariants,
+            })
             if (v === null || v === undefined || this.hasVariants) return true
             // Otherwise, originalPrice must be a number greater than selling price.
             return v > this.price

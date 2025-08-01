@@ -6,6 +6,27 @@ module.exports = (tenantDB) => {
     return tenantDB.models.Product
   }
 
+  // NEW: Variant Attribute Schema
+  const variantAttributeSchema = new mongoose.Schema(
+    {
+      name: {
+        type: String,
+        required: [true, "Variant attribute name is required."],
+        trim: true,
+        maxlength: [100, "Variant attribute name cannot exceed 100 characters."],
+      },
+      values: [
+        {
+          type: String,
+          required: [true, "Variant attribute value is required."],
+          trim: true,
+          maxlength: [100, "Variant attribute value cannot exceed 100 characters."],
+        },
+      ],
+    },
+    { _id: false }, // No _id for subdocuments in this array
+  )
+
   // FIXED: Variant subdocument schema with better stock handling
   const variantSchema = new mongoose.Schema(
     {
@@ -15,10 +36,19 @@ module.exports = (tenantDB) => {
         trim: true,
         maxlength: [100, "Variant name cannot exceed 100 characters"],
       },
+      // UPDATED: options now an array of objects { attributeName, value }
       options: [
         {
-          type: String,
-          trim: true,
+          attributeName: {
+            type: String,
+            required: [true, "Variant option attribute name is required."],
+            trim: true,
+          },
+          value: {
+            type: String,
+            required: [true, "Variant option value is required."],
+            trim: true,
+          },
         },
       ],
       price: {
@@ -265,6 +295,32 @@ module.exports = (tenantDB) => {
         default: false,
         index: true,
       },
+      // NEW: Variant Attributes definition
+      variantAttributes: {
+        type: [variantAttributeSchema],
+        default: [],
+        validate: {
+          validator: function (attributes) {
+            if (this.hasVariants === true || this.hasVariants === "true") {
+              if (attributes.length === 0) {
+                return false // Must have attributes if hasVariants is true
+              }
+              // Ensure attribute names are unique
+              const attributeNames = attributes.map((attr) => attr.name.toLowerCase())
+              const uniqueAttributeNames = [...new Set(attributeNames)]
+              if (attributeNames.length !== uniqueAttributeNames.length) {
+                return false // Duplicate attribute names
+              }
+              // Ensure each attribute has at least one value
+              return attributes.every(
+                (attr) => attr.name.trim() && attr.values.length > 0 && attr.values.every((val) => val.trim()),
+              )
+            }
+            return true // No validation if hasVariants is false
+          },
+          message: "At least one unique variant attribute with values is required when hasVariants is true.",
+        },
+      },
       // FIXED: Simplified variants validation
       variants: {
         type: [variantSchema],
@@ -276,13 +332,11 @@ module.exports = (tenantDB) => {
               hasVariantsType: typeof this.hasVariants,
               variantsLength: variants.length,
             })
-
             // If hasVariants is false, variants array must be empty
             if (this.hasVariants === false || this.hasVariants === "false") {
               console.log("🔍 hasVariants is FALSE, checking if variants is empty:", variants.length === 0)
               return variants.length === 0
             }
-
             // If hasVariants is true, must have at least one variant
             if (this.hasVariants === true || this.hasVariants === "true") {
               console.log("🔍 hasVariants is TRUE, checking if variants exist:", variants.length > 0)
@@ -292,9 +346,30 @@ module.exports = (tenantDB) => {
               // Check for duplicate SKUs within variants
               const skus = variants.map((v) => v.sku)
               const uniqueSkus = [...new Set(skus)]
-              return skus.length === uniqueSkus.length
+              if (skus.length !== uniqueSkus.length) {
+                return false // Duplicate variant SKUs
+              }
+              // NEW: Validate that each variant's options match the defined variantAttributes
+              const definedAttributes = this.variantAttributes.map((attr) => attr.name.toLowerCase())
+              return variants.every((variant) => {
+                if (!variant.options || variant.options.length !== definedAttributes.length) {
+                  return false // Mismatch in number of options or options missing
+                }
+                const variantOptionNames = variant.options.map((opt) => opt.attributeName.toLowerCase())
+                // Check if all defined attributes are present in variant options
+                const allAttributesPresent = definedAttributes.every((attrName) =>
+                  variantOptionNames.includes(attrName),
+                )
+                // Check if variant options only contain defined attributes and their values are valid
+                const validOptionValues = variant.options.every((opt) => {
+                  const attrDef = this.variantAttributes.find(
+                    (attr) => attr.name.toLowerCase() === opt.attributeName.toLowerCase(),
+                  )
+                  return attrDef && attrDef.values.includes(opt.value)
+                })
+                return allAttributesPresent && validOptionValues
+              })
             }
-
             // Default case
             console.log("🔍 VALIDATION: Unexpected hasVariants value:", this.hasVariants)
             return true
@@ -305,7 +380,6 @@ module.exports = (tenantDB) => {
               variantsLength: props.value.length,
               path: props.path,
             })
-
             if (this.hasVariants === false || this.hasVariants === "false") {
               if (props.value.length > 0) {
                 return "Variants should be empty when hasVariants is false"
@@ -315,7 +389,13 @@ module.exports = (tenantDB) => {
               if (props.value.length === 0) {
                 return "At least one variant is required when hasVariants is true"
               }
-              return "Duplicate variant SKUs are not allowed"
+              // More specific messages for variant validation failures
+              const skus = props.value.map((v) => v.sku)
+              const uniqueSkus = [...new Set(skus)]
+              if (skus.length !== uniqueSkus.length) {
+                return "Duplicate variant SKUs are not allowed"
+              }
+              return "Variant options must match defined attributes and their values."
             }
             return "Variant validation failed"
           },
@@ -434,49 +514,41 @@ module.exports = (tenantDB) => {
           .replace(/[^a-z0-9]+/g, "-")
           .replace(/(^-|-$)/g, "")
       }
-
       // Update stock status only if tracking quantity
       if (this.trackQuantity === true) {
         this.updateStockStatus()
       } else {
         this.stockStatus = "not-tracked"
       }
-
       // Set thumbnail from gallery if not set
       if (!this.thumbnail && this.gallery && this.gallery.length > 0) {
         this.thumbnail = this.gallery[0]
       }
-
       // Validate variant-specific logic
       if (this.hasVariants === true || this.hasVariants === "true") {
         console.log("🔍 PRE-SAVE: Processing variant product")
         // Reset main product price for variant products
         this.price = 0
-
         // Handle stock for variant products
         if (this.trackQuantity === true) {
           this.stock = 0 // Variants handle their own stock
         } else {
           this.stock = undefined // Remove stock field if not tracking
         }
-
         // Ensure we have variants
         if (!this.variants || this.variants.length === 0) {
           return next(new Error("At least one variant is required when hasVariants is true"))
         }
-
         // Validate variant SKUs are unique
         const variantSkus = this.variants.map((v) => v.sku)
         const uniqueSkus = [...new Set(variantSkus)]
         if (variantSkus.length !== uniqueSkus.length) {
           return next(new Error("Variant SKUs must be unique"))
         }
-
         // Check for duplicate with main product SKU
         if (variantSkus.includes(this.sku)) {
           return next(new Error("Variant SKU cannot be the same as product SKU"))
         }
-
         // FIXED: Validate variant stock fields based on trackQuantity
         if (this.trackQuantity === true) {
           for (const variant of this.variants) {
@@ -489,7 +561,6 @@ module.exports = (tenantDB) => {
         console.log("🔍 PRE-SAVE: Processing non-variant product")
         // Clear variants for non-variant products
         this.variants = []
-
         // Handle stock for non-variant products
         if (this.trackQuantity === true) {
           // Set default stock if tracking quantity and no stock is set
@@ -501,7 +572,6 @@ module.exports = (tenantDB) => {
           this.stock = undefined
         }
       }
-
       next()
     } catch (error) {
       next(error)
@@ -517,7 +587,6 @@ module.exports = (tenantDB) => {
         variantsLength: update.variants ? update.variants.length : 0,
         trackQuantity: update.trackQuantity,
       })
-
       // Handle variants validation for update operations
       if (update.hasVariants === true || update.hasVariants === "true") {
         if (!update.variants || update.variants.length === 0) {
@@ -528,7 +597,6 @@ module.exports = (tenantDB) => {
           return next(new Error("Variants should be empty when hasVariants is false"))
         }
       }
-
       next()
     } catch (error) {
       next(error)
@@ -541,12 +609,10 @@ module.exports = (tenantDB) => {
       this.stockStatus = "not-tracked"
       return
     }
-
     let currentStock = this.stock || 0
     if (this.hasVariants) {
       currentStock = this.totalVariantStock
     }
-
     if (currentStock === 0) {
       this.stockStatus = this.allowBackorders ? "backorderable" : "out-of-stock"
     } else if (currentStock <= this.lowStockAlert) {
@@ -562,7 +628,7 @@ module.exports = (tenantDB) => {
       return true // Always available if not tracking quantity
     }
     if (this.hasVariants) {
-      return this.variants.some((variant) => Number.parseInt(variant.stock || 0) > 0)
+      return this.variants.some((variant) => Number.parseInt(variant.stock) > 0)
     }
     return (this.stock || 0) > 0
   }
@@ -574,7 +640,7 @@ module.exports = (tenantDB) => {
     }
     if (this.hasVariants && variantId) {
       const variant = this.variants.id(variantId)
-      return variant ? Number.parseInt(variant.stock || 0) : 0
+      return variant ? Number.parseInt(variant.stock) : 0
     }
     if (this.hasVariants) {
       return this.totalVariantStock
@@ -590,7 +656,7 @@ module.exports = (tenantDB) => {
     if (this.hasVariants && variantId) {
       const variant = this.variants.id(variantId)
       if (variant) {
-        const currentStock = Number.parseInt(variant.stock || 0)
+        const currentStock = Number.parseInt(variant.stock)
         variant.stock = Math.max(0, currentStock - quantity).toString()
       }
     } else if (!this.hasVariants) {

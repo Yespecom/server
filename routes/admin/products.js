@@ -604,9 +604,11 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
   try {
     console.log("📝 Updating product:", req.params.id)
     console.log("📋 Request body keys:", Object.keys(req.body))
-    console.log("📋 Request body values:", {
+    console.log("📋 Request body values (raw):", {
       hasVariants: req.body.hasVariants,
       trackQuantity: req.body.trackQuantity,
+      price: req.body.price,
+      originalPrice: req.body.originalPrice,
       variants: req.body.variants ? (typeof req.body.variants === "string" ? "string" : "array") : "undefined",
     })
 
@@ -619,9 +621,15 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
       })
     }
 
-    console.log("📋 Current product trackQuantity:", product.trackQuantity)
-    console.log("📋 Current product hasVariants:", product.hasVariants)
-    console.log("📋 Current product variants count:", product.variants?.length || 0)
+    console.log("📋 Existing product data from DB:", {
+      _id: product._id,
+      name: product.name,
+      price: product.price,
+      originalPrice: product.originalPrice,
+      hasVariants: product.hasVariants,
+      trackQuantity: product.trackQuantity,
+      variantsCount: product.variants?.length || 0,
+    })
 
     const {
       name,
@@ -630,8 +638,8 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
       tags,
       shortDescription,
       description,
-      price,
-      originalPrice, // This is the field we're focusing on
+      price, // This is req.body.price
+      originalPrice, // This is req.body.originalPrice
       taxPercentage,
       stock,
       lowStockAlert,
@@ -641,24 +649,46 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
       metaTitle,
       metaDescription,
       offer,
-      hasVariants,
+      hasVariants, // This is req.body.hasVariants
       variants,
       existingImages,
       trackQuantity,
     } = req.body
 
-    // Parse trackQuantity with proper boolean conversion and fallback
+    // Determine shouldTrackQuantity: Use req.body if present, else existing product's value
     let shouldTrackQuantity
     if (trackQuantity !== undefined) {
       shouldTrackQuantity = trackQuantity === "true" || trackQuantity === true || trackQuantity === 1
     } else {
-      shouldTrackQuantity = product.trackQuantity !== undefined ? product.trackQuantity : true
+      shouldTrackQuantity = product.trackQuantity
     }
-    console.log("🔍 Track quantity parsed:", shouldTrackQuantity, "from:", trackQuantity, typeof trackQuantity)
+    console.log(
+      "🔍 Track quantity resolved:",
+      shouldTrackQuantity,
+      "from req:",
+      trackQuantity,
+      "from product:",
+      product.trackQuantity,
+    )
 
-    // Handle image updates
+    // Determine isVariantProduct: Use req.body if present, else existing product's value
+    let isVariantProduct
+    if (hasVariants !== undefined) {
+      isVariantProduct = hasVariants === "true" || hasVariants === true || hasVariants === 1
+    } else {
+      isVariantProduct = product.hasVariants
+    }
+    console.log(
+      "🔍 Is variant product resolved:",
+      isVariantProduct,
+      "from req:",
+      hasVariants,
+      "from product:",
+      product.hasVariants,
+    )
+
+    // Handle image updates (already seems fine)
     let gallery = parseExistingImages(existingImages)
-
     // Add new uploaded images
     if (req.files && req.files.length > 0) {
       try {
@@ -677,9 +707,6 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
 
     // Parse and validate variants
     let parsedVariants = []
-    // Ensure proper boolean conversion for hasVariants
-    const isVariantProduct = hasVariants === "true" || hasVariants === true || hasVariants === 1
-    console.log("🔍 Is variant product:", isVariantProduct, "from hasVariants:", hasVariants, typeof hasVariants)
     try {
       if (isVariantProduct) {
         parsedVariants = parseVariants(variants, isVariantProduct, shouldTrackQuantity)
@@ -697,21 +724,60 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
       })
     }
 
-    // Parse and validate other fields
-    const parsedPrice = isVariantProduct ? 0 : Number.parseFloat(price) || product.price
-    let finalOriginalPrice = undefined // Initialize as undefined
-
-    // NEW LOGIC for originalPrice: Only set if valid and greater than selling price
-    if (!isVariantProduct && originalPrice !== undefined && originalPrice !== null && originalPrice !== "") {
-      const parsedOriginalVal = Number.parseFloat(originalPrice)
-      if (!isNaN(parsedOriginalVal) && parsedOriginalVal > parsedPrice) {
-        finalOriginalPrice = parsedOriginalVal
+    // Determine the effective selling price for the update payload
+    let effectiveSellingPrice
+    if (isVariantProduct) {
+      effectiveSellingPrice = 0 // Price is 0 for variant products
+    } else {
+      // For non-variant products, use req.body.price if valid, else product.price
+      const reqPriceNum = Number.parseFloat(price)
+      if (price !== undefined && price !== null && price !== "" && !isNaN(reqPriceNum) && reqPriceNum >= 0) {
+        effectiveSellingPrice = reqPriceNum
       } else {
-        console.log(
-          `⚠️ Original price (${parsedOriginalVal}) is not greater than selling price (${parsedPrice}), setting to undefined.`,
-        )
+        effectiveSellingPrice = product.price // Fallback to existing price
       }
     }
+    console.log(
+      "🔍 Effective selling price for update payload:",
+      effectiveSellingPrice,
+      "from req.body.price:",
+      price,
+      "product.price:",
+      product.price,
+    )
+
+    let finalOriginalPrice = undefined // Initialize as undefined
+
+    // Logic for originalPrice for non-variant products
+    if (!isVariantProduct) {
+      if (originalPrice !== undefined && originalPrice !== null && originalPrice !== "") {
+        const parsedOriginalVal = Number.parseFloat(originalPrice)
+        if (!isNaN(parsedOriginalVal) && parsedOriginalVal >= 0) {
+          // Only set if it's a valid number and greater than the effective selling price
+          if (parsedOriginalVal > effectiveSellingPrice) {
+            finalOriginalPrice = parsedOriginalVal
+          } else {
+            console.log(
+              `⚠️ Original price (${parsedOriginalVal}) is not greater than selling price (${effectiveSellingPrice}), setting to undefined.`,
+            )
+          }
+        } else {
+          console.log(`⚠️ Original price (${originalPrice}) is not a valid number, setting to undefined.`)
+        }
+      } else {
+        // If originalPrice is explicitly empty/null/undefined, ensure it's undefined
+        finalOriginalPrice = undefined
+      }
+    } else {
+      // If it's a variant product, originalPrice for the main product should always be undefined
+      finalOriginalPrice = undefined
+    }
+    console.log(
+      "🔍 Final original price for update payload:",
+      finalOriginalPrice,
+      "from req.body.originalPrice:",
+      originalPrice,
+    )
 
     let parsedDimensions = product.dimensions || { length: 0, width: 0, height: 0 }
     try {
@@ -742,7 +808,7 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
     // Generate slug if name changed
     const slug = name !== product.name ? generateSlug(name) : product.slug
 
-    // Create update data with proper field handling
+    // Construct updateData object
     const updateData = {
       name: name?.trim() || product.name,
       slug,
@@ -751,7 +817,7 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
       tags: parsedTags,
       shortDescription: shortDescription?.trim() || product.shortDescription,
       description: description?.trim() || product.description,
-      price: parsedPrice,
+      price: effectiveSellingPrice, // Ensure price is always set
       originalPrice: finalOriginalPrice, // Use the new finalOriginalPrice
       taxPercentage: Number.parseFloat(taxPercentage) || product.taxPercentage || 0,
       lowStockAlert: Number.parseInt(lowStockAlert) || product.lowStockAlert || 5,
@@ -764,6 +830,9 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
       metaDescription: metaDescription?.trim() || product.metaDescription,
       offer: parseOfferField(offer),
       hasVariants: isVariantProduct, // Use the properly parsed boolean
+      variantAttributes: req.body.variantAttributes
+        ? JSON.parse(req.body.variantAttributes)
+        : product.variantAttributes, // Ensure variantAttributes are passed
       variants: parsedVariants, // This will be [] when hasVariants is false
       trackQuantity: shouldTrackQuantity,
     }
@@ -786,7 +855,7 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
       updateData.$unset = { stock: 1 }
     }
 
-    console.log("📋 Update data summary:", {
+    console.log("📋 Final update data sent to Mongoose:", {
       hasVariants: updateData.hasVariants,
       variantCount: updateData.variants.length,
       trackQuantity: updateData.trackQuantity,

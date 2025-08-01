@@ -451,7 +451,7 @@ router.post("/", fileUpload.array("images", 10), async (req, res) => {
         })
       }
 
-      // NEW LOGIC for originalPrice
+      // NEW LOGIC for originalPrice: Only set if valid and greater than selling price
       if (originalPrice !== undefined && originalPrice !== null && originalPrice !== "") {
         const parsedOriginalVal = Number.parseFloat(originalPrice)
         if (!isNaN(parsedOriginalVal) && parsedOriginalVal > parsedPrice) {
@@ -701,7 +701,7 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
     const parsedPrice = isVariantProduct ? 0 : Number.parseFloat(price) || product.price
     let finalOriginalPrice = undefined // Initialize as undefined
 
-    // NEW LOGIC for originalPrice
+    // NEW LOGIC for originalPrice: Only set if valid and greater than selling price
     if (!isVariantProduct && originalPrice !== undefined && originalPrice !== null && originalPrice !== "") {
       const parsedOriginalVal = Number.parseFloat(originalPrice)
       if (!isNaN(parsedOriginalVal) && parsedOriginalVal > parsedPrice) {

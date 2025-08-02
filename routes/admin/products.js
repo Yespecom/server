@@ -91,8 +91,15 @@ const parseVariants = (variants, hasVariants, trackQuantity) => {
       console.log(`🔄 Processing variant ${index + 1}:`, variant)
       // Validate required fields
       const requiredFields = ["name", "price", "sku"]
+      if (shouldTrackQuantity) {
+        requiredFields.push("stock")
+      }
       const missingFields = requiredFields.filter((field) => {
         const value = variant[field]
+        // For stock, specifically check if it's undefined/null/empty string AND tracking is enabled
+        if (field === "stock" && shouldTrackQuantity) {
+          return value === undefined || value === null || value === ""
+        }
         return !value && value !== "0" && value !== 0
       })
       if (missingFields.length > 0) {
@@ -103,20 +110,33 @@ const parseVariants = (variants, hasVariants, trackQuantity) => {
       // Convert and validate numeric fields
       const price = Number.parseFloat(variant.price)
       const originalPrice = variant.originalPrice ? Number.parseFloat(variant.originalPrice) : undefined
-
       if (isNaN(price) || price < 0) {
         throw new Error(`Variant "${variant.name}" has invalid price: ${variant.price}`)
       }
       if (originalPrice !== undefined && (isNaN(originalPrice) || originalPrice < 0)) {
         throw new Error(`Variant "${variant.name}" has invalid original price: ${variant.originalPrice}`)
       }
+      // Ensure originalPrice is greater than price if both are present
+      if (originalPrice !== undefined && price !== undefined && originalPrice <= price) {
+        console.log(
+          `⚠️ Variant "${variant.name}" original price (${originalPrice}) is not greater than selling price (${price}), setting to undefined.`,
+        )
+        // Set to undefined so it's not saved if invalid
+        variant.originalPrice = undefined
+      }
 
       // Create processed variant object
       const processedVariant = {
         name: variant.name.trim(),
-        options: Array.isArray(variant.options) ? variant.options : [variant.name.trim()],
+        // Ensure options are correctly parsed as array of objects
+        options: Array.isArray(variant.options)
+          ? variant.options.map((opt) => ({
+              attributeName: opt.attributeName?.trim() || "",
+              value: opt.value?.trim() || "",
+            }))
+          : [],
         price: price.toString(), // Keep as string to match schema
-        originalPrice: originalPrice ? originalPrice.toString() : undefined,
+        originalPrice: variant.originalPrice ? variant.originalPrice.toString() : undefined, // Use the potentially updated originalPrice
         sku: variant.sku.trim().toUpperCase(),
         isActive: variant.isActive !== undefined ? Boolean(variant.isActive) : true,
         image: variant.image || "",
@@ -134,9 +154,11 @@ const parseVariants = (variants, hasVariants, trackQuantity) => {
           }
           processedVariant.stock = stock.toString()
         }
+      } else {
+        // If not tracking quantity, ensure stock is not included in the variant object
+        delete processedVariant.stock
       }
 
-      // If not tracking quantity, don't include stock field at all
       // Only include _id if it's a valid ObjectId (not temp ID)
       if (
         variant._id &&
@@ -329,6 +351,7 @@ router.post("/", fileUpload.array("images", 10), async (req, res) => {
     console.log("📋 Files:", req.files?.length || 0)
 
     const { Product } = ensureModelsLoaded(req.tenantDB)
+
     const {
       name,
       sku,
@@ -351,11 +374,15 @@ router.post("/", fileUpload.array("images", 10), async (req, res) => {
       variants,
       existingImages,
       trackQuantity,
+      variantAttributes, // NEW: variantAttributes from frontend
     } = req.body
 
-    // Parse trackQuantity with proper boolean conversion
+    // Parse boolean flags
     const shouldTrackQuantity = trackQuantity === "true" || trackQuantity === true || trackQuantity === 1
+    const isVariantProduct = hasVariants === "true" || hasVariants === true || hasVariants === 1
+
     console.log("🔍 Track quantity parsed:", shouldTrackQuantity, "from:", trackQuantity, typeof trackQuantity)
+    console.log("🔍 Has variants parsed:", isVariantProduct, "from:", hasVariants, typeof hasVariants)
 
     // Validate required fields
     if (!name || !name.trim()) {
@@ -400,24 +427,56 @@ router.post("/", fileUpload.array("images", 10), async (req, res) => {
 
     // Parse and validate variants
     let parsedVariants = []
-    const isVariantProduct = hasVariants === "true" || hasVariants === true
-    try {
-      parsedVariants = parseVariants(variants, isVariantProduct, shouldTrackQuantity)
-      console.log("🔄 Parsed variants:", parsedVariants.length)
-    } catch (variantError) {
-      console.error("❌ Variant parsing error:", variantError)
-      return res.status(400).json({
-        success: false,
-        error: "Variant validation failed",
-        details: variantError.message,
-      })
+    let parsedVariantAttributes = []
+
+    if (isVariantProduct) {
+      try {
+        parsedVariants = parseVariants(variants, isVariantProduct, shouldTrackQuantity)
+        console.log("🔄 Parsed variants:", parsedVariants.length)
+      } catch (variantError) {
+        console.error("❌ Variant parsing error:", variantError)
+        return res.status(400).json({
+          success: false,
+          error: "Variant validation failed",
+          details: variantError.message,
+        })
+      }
+
+      // Parse variant attributes
+      try {
+        parsedVariantAttributes = variantAttributes ? JSON.parse(variantAttributes) : []
+        if (!Array.isArray(parsedVariantAttributes)) {
+          throw new Error("Variant attributes must be an array.")
+        }
+        // Basic validation for attributes
+        const missingAttrFields = parsedVariantAttributes.some(
+          (attr) => !attr.name?.trim() || !Array.isArray(attr.values) || attr.values.length === 0,
+        )
+        if (missingAttrFields) {
+          throw new Error("All variant attributes must have a name and at least one value.")
+        }
+        const duplicateAttrNames =
+          new Set(parsedVariantAttributes.map((attr) => attr.name.toLowerCase())).size !==
+          parsedVariantAttributes.length
+        if (duplicateAttrNames) {
+          throw new Error("Variant attribute names must be unique.")
+        }
+        console.log("🔄 Parsed variant attributes:", parsedVariantAttributes.length)
+      } catch (attrError) {
+        console.error("❌ Variant attributes parsing error:", attrError)
+        return res.status(400).json({
+          success: false,
+          error: "Variant attributes validation failed",
+          details: attrError.message,
+        })
+      }
     }
 
     // Validate images based on product type
     if (!isVariantProduct && gallery.length === 0) {
       return res.status(400).json({
         success: false,
-        error: "At least one product image is required",
+        error: "At least one product image is required for non-variant products",
       })
     }
     if (isVariantProduct) {
@@ -425,6 +484,12 @@ router.post("/", fileUpload.array("images", 10), async (req, res) => {
         return res.status(400).json({
           success: false,
           error: "At least one variant is required when variants are enabled",
+        })
+      }
+      if (parsedVariantAttributes.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: "At least one variant attribute is required when variants are enabled",
         })
       }
       // For variant products, check if at least one image exists (main or variant)
@@ -441,13 +506,14 @@ router.post("/", fileUpload.array("images", 10), async (req, res) => {
     // Validate non-variant product fields
     let parsedPrice = 0
     let finalOriginalPrice = undefined // Initialize as undefined
+    let finalStock = undefined // Initialize as undefined
 
     if (!isVariantProduct) {
       parsedPrice = Number.parseFloat(price) || 0
       if (parsedPrice <= 0) {
         return res.status(400).json({
           success: false,
-          error: "Price must be greater than 0",
+          error: "Price must be greater than 0 for non-variant products",
         })
       }
 
@@ -466,11 +532,16 @@ router.post("/", fileUpload.array("images", 10), async (req, res) => {
       if (shouldTrackQuantity) {
         if (stock === undefined || stock === null || stock === "") {
           console.log("⚠️ No stock provided, setting default to 0")
-        } else if (Number.parseInt(stock) < 0) {
-          return res.status(400).json({
-            success: false,
-            error: "Stock quantity cannot be negative when quantity tracking is enabled",
-          })
+          finalStock = 0
+        } else {
+          const parsedStock = Number.parseInt(stock)
+          if (isNaN(parsedStock) || parsedStock < 0) {
+            return res.status(400).json({
+              success: false,
+              error: "Stock quantity cannot be negative or invalid when quantity tracking is enabled",
+            })
+          }
+          finalStock = parsedStock
         }
       }
     }
@@ -514,7 +585,7 @@ router.post("/", fileUpload.array("images", 10), async (req, res) => {
       tags: parsedTags,
       shortDescription: shortDescription?.trim() || "",
       description: description?.trim() || "",
-      price: isVariantProduct ? 0 : parsedPrice, // Use parsedPrice here
+      price: isVariantProduct ? 0 : parsedPrice, // Use parsedPrice here, 0 for variant products
       originalPrice: finalOriginalPrice, // Use the new finalOriginalPrice
       taxPercentage: Number.parseFloat(taxPercentage) || 0,
       lowStockAlert: Number.parseInt(lowStockAlert) || 5,
@@ -529,17 +600,18 @@ router.post("/", fileUpload.array("images", 10), async (req, res) => {
       hasVariants: isVariantProduct,
       variants: parsedVariants,
       trackQuantity: shouldTrackQuantity,
+      variantAttributes: parsedVariantAttributes, // NEW: Add variant attributes
       isActive: true,
     }
 
-    // Only set stock if tracking quantity
-    if (shouldTrackQuantity) {
-      if (isVariantProduct) {
-        productData.stock = 0 // Variants handle their own stock
-      } else {
-        productData.stock = stock !== undefined && stock !== null && stock !== "" ? Number.parseInt(stock) : 0
-      }
+    // Only set stock for main product if tracking quantity AND not a variant product
+    if (shouldTrackQuantity && !isVariantProduct) {
+      productData.stock = finalStock
+    } else if (isVariantProduct) {
+      // If it's a variant product, main stock is 0
+      productData.stock = 0
     }
+    // If not tracking quantity, stock field is omitted by default
 
     console.log("📋 Final product data:", {
       ...productData,
@@ -547,14 +619,20 @@ router.post("/", fileUpload.array("images", 10), async (req, res) => {
       trackQuantity: productData.trackQuantity,
       hasStock: "stock" in productData,
       stockValue: productData.stock,
+      variantAttributes:
+        productData.variantAttributes.length > 0
+          ? `${productData.variantAttributes.length} attributes`
+          : "no attributes",
     })
 
     // Create and save product
     const product = new Product(productData)
     await product.save()
+
     console.log("✅ Product created successfully:", product._id)
     console.log("✅ Product variants saved:", product.variants.length)
     console.log("✅ Quantity tracking:", product.trackQuantity)
+    console.log("✅ Variant attributes saved:", product.variantAttributes.length)
 
     // Try to populate the response
     try {
@@ -610,10 +688,16 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
       price: req.body.price,
       originalPrice: req.body.originalPrice,
       variants: req.body.variants ? (typeof req.body.variants === "string" ? "string" : "array") : "undefined",
+      variantAttributes: req.body.variantAttributes
+        ? typeof req.body.variantAttributes === "string"
+          ? "string"
+          : "array"
+        : "undefined",
     })
 
     const { Product } = ensureModelsLoaded(req.tenantDB)
     const product = await Product.findById(req.params.id)
+
     if (!product) {
       return res.status(404).json({
         success: false,
@@ -629,6 +713,7 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
       hasVariants: product.hasVariants,
       trackQuantity: product.trackQuantity,
       variantsCount: product.variants?.length || 0,
+      variantAttributesCount: product.variantAttributes?.length || 0,
     })
 
     const {
@@ -653,6 +738,7 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
       variants,
       existingImages,
       trackQuantity,
+      variantAttributes, // NEW: variantAttributes from frontend
     } = req.body
 
     // Determine shouldTrackQuantity: Use req.body if present, else existing product's value
@@ -705,23 +791,50 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
       }
     }
 
-    // Parse and validate variants
+    // Parse and validate variants and variant attributes
     let parsedVariants = []
-    try {
-      if (isVariantProduct) {
+    let parsedVariantAttributes = []
+
+    if (isVariantProduct) {
+      try {
         parsedVariants = parseVariants(variants, isVariantProduct, shouldTrackQuantity)
         console.log("🔄 Updated variants:", parsedVariants.length)
-      } else {
-        parsedVariants = []
-        console.log("🔄 Variants disabled, clearing variants array")
+      } catch (variantError) {
+        console.error("❌ Variant parsing error:", variantError)
+        return res.status(400).json({
+          success: false,
+          error: "Variant validation failed",
+          details: variantError.message,
+        })
       }
-    } catch (variantError) {
-      console.error("❌ Variant parsing error:", variantError)
-      return res.status(400).json({
-        success: false,
-        error: "Variant validation failed",
-        details: variantError.message,
-      })
+
+      // Parse variant attributes
+      try {
+        parsedVariantAttributes = variantAttributes ? JSON.parse(variantAttributes) : []
+        if (!Array.isArray(parsedVariantAttributes)) {
+          throw new Error("Variant attributes must be an array.")
+        }
+        const missingAttrFields = parsedVariantAttributes.some(
+          (attr) => !attr.name?.trim() || !Array.isArray(attr.values) || attr.values.length === 0,
+        )
+        if (missingAttrFields) {
+          throw new Error("All variant attributes must have a name and at least one value.")
+        }
+        const duplicateAttrNames =
+          new Set(parsedVariantAttributes.map((attr) => attr.name.toLowerCase())).size !==
+          parsedVariantAttributes.length
+        if (duplicateAttrNames) {
+          throw new Error("Variant attribute names must be unique.")
+        }
+        console.log("🔄 Parsed variant attributes:", parsedVariantAttributes.length)
+      } catch (attrError) {
+        console.error("❌ Variant attributes parsing error:", attrError)
+        return res.status(400).json({
+          success: false,
+          error: "Variant attributes validation failed",
+          details: attrError.message,
+        })
+      }
     }
 
     // Determine the effective selling price for the update payload
@@ -747,7 +860,6 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
     )
 
     let finalOriginalPrice = undefined // Initialize as undefined
-
     // Logic for originalPrice for non-variant products
     if (!isVariantProduct) {
       if (originalPrice !== undefined && originalPrice !== null && originalPrice !== "") {
@@ -830,17 +942,15 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
       metaDescription: metaDescription?.trim() || product.metaDescription,
       offer: parseOfferField(offer),
       hasVariants: isVariantProduct, // Use the properly parsed boolean
-      variantAttributes: req.body.variantAttributes
-        ? JSON.parse(req.body.variantAttributes)
-        : product.variantAttributes, // Ensure variantAttributes are passed
+      variantAttributes: parsedVariantAttributes, // NEW: Add variant attributes
       variants: parsedVariants, // This will be [] when hasVariants is false
       trackQuantity: shouldTrackQuantity,
     }
 
-    // Handle stock field based on trackQuantity
+    // Handle stock field based on trackQuantity and hasVariants
     if (shouldTrackQuantity) {
       if (isVariantProduct) {
-        updateData.stock = 0 // Variants handle their own stock
+        updateData.stock = 0 // Variants handle their own stock, main product stock is 0
       } else {
         // For non-variant products with quantity tracking
         if (stock !== undefined && stock !== null && stock !== "") {
@@ -853,6 +963,7 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
     } else {
       // If quantity tracking is disabled, we need to unset the stock field
       updateData.$unset = { stock: 1 }
+      delete updateData.stock // Remove stock from $set if it was there
     }
 
     console.log("📋 Final update data sent to Mongoose:", {
@@ -864,6 +975,7 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
       hasUnset: "$unset" in updateData,
       updateDataPrice: updateData.price, // Added for debugging
       updateDataOriginalPrice: updateData.originalPrice, // Added for debugging
+      variantAttributesCount: updateData.variantAttributes.length,
     })
 
     // CRITICAL: Log the exact variants being sent to MongoDB
@@ -885,6 +997,7 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
     console.log("✅ Product updated successfully:", updatedProduct._id)
     console.log("✅ Product variants updated:", updatedProduct.variants.length)
     console.log("✅ Quantity tracking:", updatedProduct.trackQuantity)
+    console.log("✅ Variant attributes updated:", updatedProduct.variantAttributes.length)
 
     res.json({
       success: true,
@@ -894,7 +1007,6 @@ router.put("/:id", fileUpload.array("images", 10), async (req, res) => {
   } catch (error) {
     console.error("❌ Update product error:", error)
     console.error("❌ Error stack:", error.stack)
-
     // Enhanced error handling with more details
     if (error.name === "ValidationError") {
       const errors = Object.keys(error.errors).map((key) => ({
@@ -959,6 +1071,17 @@ router.delete("/:id", async (req, res) => {
         for (const imageUrl of product.gallery) {
           if (imageUrl.includes("cloudinary.com")) {
             const publicId = getPublicIdFromUrl(imageUrl)
+            if (publicId) {
+              await deleteImage(`yesp-products/${publicId}`)
+            }
+          }
+        }
+      }
+      // Also delete variant images
+      if (product.hasVariants && product.variants && product.variants.length > 0) {
+        for (const variant of product.variants) {
+          if (variant.image && variant.image.includes("cloudinary.com")) {
+            const publicId = getPublicIdFromUrl(variant.image)
             if (publicId) {
               await deleteImage(`yesp-products/${publicId}`)
             }

@@ -37,20 +37,27 @@ module.exports = (tenantDB) => {
         maxlength: [100, "Variant name cannot exceed 100 characters"],
       },
       // UPDATED: options now an array of objects { attributeName, value }
-      options: [
-        {
-          attributeName: {
-            type: String,
-            required: [true, "Variant option attribute name is required."],
-            trim: true,
+      options: {
+        type: [
+          {
+            attributeName: {
+              type: String,
+              required: [true, "Variant option attribute name is required."],
+              trim: true,
+            },
+            value: {
+              type: String,
+              required: [true, "Variant option value is required."],
+              trim: true,
+            },
           },
-          value: {
-            type: String,
-            required: [true, "Variant option value is required."],
-            trim: true,
-          },
+        ],
+        required: [true, "Variant options are required."],
+        validate: {
+          validator: (options) => options.length > 0,
+          message: "Variant must have at least one option.",
         },
-      ],
+      },
       price: {
         type: String,
         required: [true, "Variant price is required"],
@@ -65,12 +72,14 @@ module.exports = (tenantDB) => {
       originalPrice: {
         type: String,
         validate: {
-          validator: (v) => {
-            if (!v) return true // Optional field: allows null, undefined, empty string, 0
-            const price = Number.parseFloat(v)
-            return !isNaN(price) && price >= 0
+          validator: function (v) {
+            if (v === null || v === undefined || v === "") return true // Optional field: allows null, undefined, empty string
+            const price = Number.parseFloat(this.price) // Get selling price from the same variant
+            const originalPrice = Number.parseFloat(v)
+            // Original price must be a valid number and greater than selling price
+            return !isNaN(originalPrice) && originalPrice >= 0 && originalPrice > price
           },
-          message: "Original price must be a valid positive number",
+          message: "Original price must be a valid positive number and greater than selling price",
         },
       },
       // FIXED: Stock field with simpler validation
@@ -79,11 +88,13 @@ module.exports = (tenantDB) => {
         validate: {
           validator: (v) => {
             // If stock field is present, validate it
-            if (v !== undefined && v !== null) {
+            if (v !== undefined && v !== null && v !== "") {
               const stock = Number.parseInt(v)
               return !isNaN(stock) && stock >= 0
             }
-            return true // Allow undefined/null values
+            // If trackQuantity is true for the product, stock is required for variants
+            // This check is primarily for the pre-save/update hooks
+            return true // Allow undefined/null/empty string values, validation handled in pre-hooks
           },
           message: "Stock must be a valid non-negative number",
         },
@@ -196,7 +207,7 @@ module.exports = (tenantDB) => {
       price: {
         type: Number,
         required: function () {
-          return !this.hasVariants
+          return !this.hasVariants // Required only if no variants
         },
         min: [0, "Price cannot be negative"],
         validate: {
@@ -212,27 +223,16 @@ module.exports = (tenantDB) => {
         min: [0, "Original price cannot be negative"],
         validate: {
           validator: function (v) {
-            // In findByIdAndUpdate, 'this' refers to the update object.
-            // We need to get the 'price' and 'hasVariants' from the update object if present,
-            // otherwise from the original document (which Mongoose might not provide directly here).
-            // The API route should ensure 'price' and 'hasVariants' are always in the update payload.
-            const currentPrice = this.price // This should now be set by the API route
-            const currentHasVariants = this.hasVariants // This should now be set by the API route
+            // 'this' refers to the document being validated
+            const currentPrice = this.price
+            const currentHasVariants = this.hasVariants
 
-            console.log("🔍 Mongoose originalPrice validator (inside schema):", {
-              v, // The value of originalPrice being validated
-              currentPrice, // The value of price on the update object
-              currentHasVariants, // The value of hasVariants on the update object
-            })
-
-            // If v is null or undefined, or if currentHasVariants is true, validation passes.
+            // If originalPrice is null/undefined, or if it's a variant product, it's valid
             if (v === null || v === undefined || currentHasVariants === true) return true
 
             // If it's a non-variant product and originalPrice is provided,
             // currentPrice must be a valid number for comparison.
             if (typeof currentPrice !== "number" || isNaN(currentPrice)) {
-              // This case should ideally not be hit if the API route correctly sets `price`
-              // in the updateData. If it is, it means the selling price is missing or invalid.
               return false // Cannot validate originalPrice without a valid selling price
             }
 
@@ -240,10 +240,8 @@ module.exports = (tenantDB) => {
             return v > currentPrice
           },
           message: function (props) {
-            console.log("🔍 Mongoose originalPrice validator failed props (inside schema):", props)
             const currentPrice = this.price
             const currentHasVariants = this.hasVariants
-
             if (currentHasVariants === true) {
               return "Original price is not applicable for variant products."
             }
@@ -270,7 +268,7 @@ module.exports = (tenantDB) => {
         min: [0, "Stock cannot be negative"],
         validate: {
           validator: function (v) {
-            // Skip validation for variant products
+            // Skip validation for variant products (stock is 0 for main product)
             if (this.hasVariants) return true
             // Skip validation if quantity tracking is disabled
             if (this.trackQuantity !== true) return true
@@ -341,7 +339,7 @@ module.exports = (tenantDB) => {
         default: [],
         validate: {
           validator: function (attributes) {
-            if (this.hasVariants === true || this.hasVariants === "true") {
+            if (this.hasVariants === true) {
               if (attributes.length === 0) {
                 return false // Must have attributes if hasVariants is true
               }
@@ -351,7 +349,7 @@ module.exports = (tenantDB) => {
               if (attributeNames.length !== uniqueAttributeNames.length) {
                 return false // Duplicate attribute names
               }
-              // Ensure each attribute has at least one value
+              // Ensure each attribute has a name and at least one non-empty value
               return attributes.every(
                 (attr) => attr.name.trim() && attr.values.length > 0 && attr.values.every((val) => val.trim()),
               )
@@ -367,19 +365,13 @@ module.exports = (tenantDB) => {
         default: [],
         validate: {
           validator: function (variants) {
-            console.log("🔍 VALIDATION DEBUG:", {
-              hasVariants: this.hasVariants,
-              hasVariantsType: typeof this.hasVariants,
-              variantsLength: variants.length,
-            })
             // If hasVariants is false, variants array must be empty
-            if (this.hasVariants === false || this.hasVariants === "false") {
-              console.log("🔍 hasVariants is FALSE, checking if variants is empty:", variants.length === 0)
+            if (this.hasVariants === false) {
               return variants.length === 0
             }
+
             // If hasVariants is true, must have at least one variant
-            if (this.hasVariants === true || this.hasVariants === "true") {
-              console.log("🔍 hasVariants is TRUE, checking if variants exist:", variants.length > 0)
+            if (this.hasVariants === true) {
               if (variants.length === 0) {
                 return false
               }
@@ -389,7 +381,8 @@ module.exports = (tenantDB) => {
               if (skus.length !== uniqueSkus.length) {
                 return false // Duplicate variant SKUs
               }
-              // NEW: Validate that each variant's options match the defined variantAttributes
+
+              // Validate that each variant's options match the defined variantAttributes
               const definedAttributes = this.variantAttributes.map((attr) => attr.name.toLowerCase())
               return variants.every((variant) => {
                 if (!variant.options || variant.options.length !== definedAttributes.length) {
@@ -410,26 +403,18 @@ module.exports = (tenantDB) => {
                 return allAttributesPresent && validOptionValues
               })
             }
-            // Default case
-            console.log("🔍 VALIDATION: Unexpected hasVariants value:", this.hasVariants)
-            return true
+            return true // Default case
           },
           message: function (props) {
-            console.log("🔍 VALIDATION ERROR - props:", {
-              hasVariants: this.hasVariants,
-              variantsLength: props.value.length,
-              path: props.path,
-            })
-            if (this.hasVariants === false || this.hasVariants === "false") {
+            if (this.hasVariants === false) {
               if (props.value.length > 0) {
                 return "Variants should be empty when hasVariants is false"
               }
             }
-            if (this.hasVariants === true || this.hasVariants === "true") {
+            if (this.hasVariants === true) {
               if (props.value.length === 0) {
                 return "At least one variant is required when hasVariants is true"
               }
-              // More specific messages for variant validation failures
               const skus = props.value.map((v) => v.sku)
               const uniqueSkus = [...new Set(skus)]
               if (skus.length !== uniqueSkus.length) {
@@ -476,12 +461,17 @@ module.exports = (tenantDB) => {
           if (!ret.hasVariants) {
             ret.price = Number.parseFloat(ret.price) || 0
             // Only include stock if quantity tracking is enabled
-            if (ret.trackQuantity === true) {
+            if (ret.trackQuantity === true && ret.stock !== undefined) {
               ret.stock = Number.parseInt(ret.stock) || 0
             } else {
               delete ret.stock
             }
+          } else {
+            // For variant products, main price is 0, stock is 0
+            ret.price = 0
+            ret.stock = 0
           }
+
           // Convert variant prices and stocks to numbers
           if (ret.variants && ret.variants.length > 0) {
             ret.variants = ret.variants.map((variant) => {
@@ -490,7 +480,7 @@ module.exports = (tenantDB) => {
                 price: Number.parseFloat(variant.price) || 0,
                 originalPrice: variant.originalPrice ? Number.parseFloat(variant.originalPrice) : undefined,
               }
-              // Only include stock if quantity tracking is enabled
+              // Only include stock if quantity tracking is enabled for the product AND variant has stock
               if (ret.trackQuantity === true && variant.stock !== undefined) {
                 processedVariant.stock = Number.parseInt(variant.stock) || 0
               } else {
@@ -554,27 +544,19 @@ module.exports = (tenantDB) => {
           .replace(/[^a-z0-9]+/g, "-")
           .replace(/(^-|-$)/g, "")
       }
-      // Update stock status only if tracking quantity
-      if (this.trackQuantity === true) {
-        this.updateStockStatus()
-      } else {
-        this.stockStatus = "not-tracked"
-      }
+
       // Set thumbnail from gallery if not set
       if (!this.thumbnail && this.gallery && this.gallery.length > 0) {
         this.thumbnail = this.gallery[0]
       }
+
       // Validate variant-specific logic
-      if (this.hasVariants === true || this.hasVariants === "true") {
-        console.log("🔍 PRE-SAVE: Processing variant product")
-        // Reset main product price for variant products
+      if (this.hasVariants === true) {
+        // Reset main product price and stock for variant products
         this.price = 0
-        // Handle stock for variant products
-        if (this.trackQuantity === true) {
-          this.stock = 0 // Variants handle their own stock
-        } else {
-          this.stock = undefined // Remove stock field if not tracking
-        }
+        this.originalPrice = undefined // Original price not applicable for main product with variants
+        this.stock = 0 // Variants handle their own stock
+
         // Ensure we have variants
         if (!this.variants || this.variants.length === 0) {
           return next(new Error("At least one variant is required when hasVariants is true"))
@@ -589,7 +571,8 @@ module.exports = (tenantDB) => {
         if (variantSkus.includes(this.sku)) {
           return next(new Error("Variant SKU cannot be the same as product SKU"))
         }
-        // FIXED: Validate variant stock fields based on trackQuantity
+
+        // Validate variant stock fields based on trackQuantity
         if (this.trackQuantity === true) {
           for (const variant of this.variants) {
             if (variant.stock === undefined || variant.stock === null || variant.stock === "") {
@@ -598,9 +581,10 @@ module.exports = (tenantDB) => {
           }
         }
       } else {
-        console.log("🔍 PRE-SAVE: Processing non-variant product")
-        // Clear variants for non-variant products
+        // Clear variants and variant attributes for non-variant products
         this.variants = []
+        this.variantAttributes = []
+
         // Handle stock for non-variant products
         if (this.trackQuantity === true) {
           // Set default stock if tracking quantity and no stock is set
@@ -612,6 +596,14 @@ module.exports = (tenantDB) => {
           this.stock = undefined
         }
       }
+
+      // Update stock status only if tracking quantity
+      if (this.trackQuantity === true) {
+        this.updateStockStatus()
+      } else {
+        this.stockStatus = "not-tracked"
+      }
+
       next()
     } catch (error) {
       next(error)
@@ -623,78 +615,86 @@ module.exports = (tenantDB) => {
     try {
       const update = this.getUpdate()
       // Get the effective hasVariants and trackQuantity from the update object or the existing document
-      const effectiveHasVariants =
-        update.hasVariants !== undefined
-          ? update.hasVariants === true || update.hasVariants === "true"
-          : this.hasVariants
-      const effectiveTrackQuantity =
-        update.trackQuantity !== undefined
-          ? update.trackQuantity === true || update.trackQuantity === "true"
-          : this.trackQuantity
+      const effectiveHasVariants = update.hasVariants !== undefined ? update.hasVariants : this.hasVariants
+      const effectiveTrackQuantity = update.trackQuantity !== undefined ? update.trackQuantity : this.trackQuantity
+
+      // Ensure boolean values are correctly interpreted
+      const isVariantProduct = effectiveHasVariants === true || effectiveHasVariants === "true"
+      const shouldTrackQuantity = effectiveTrackQuantity === true || effectiveTrackQuantity === "true"
 
       console.log("🔍 PRE-UPDATE: Processing update operation:", {
         updateHasVariants: update.hasVariants,
-        effectiveHasVariants,
+        isVariantProduct,
         updateTrackQuantity: update.trackQuantity,
-        effectiveTrackQuantity,
+        shouldTrackQuantity,
         variantsLength: update.variants ? update.variants.length : 0,
       })
 
-      // Handle variants validation for update operations
-      if (effectiveHasVariants === true) {
+      // Handle variants and variant attributes validation for update operations
+      if (isVariantProduct) {
         if (!update.variants || update.variants.length === 0) {
           return next(new Error("At least one variant is required when hasVariants is true"))
         }
+        if (!update.variantAttributes || update.variantAttributes.length === 0) {
+          return next(new Error("At least one variant attribute is required when hasVariants is true"))
+        }
+
         // If variants are being updated, ensure their stock is valid if tracking quantity
-        if (effectiveTrackQuantity === true) {
+        if (shouldTrackQuantity) {
           for (const variant of update.variants) {
             if (variant.stock === undefined || variant.stock === null || variant.stock === "") {
               return next(new Error(`Variant "${variant.name}" requires stock when quantity tracking is enabled`))
             }
           }
         }
-      } else if (effectiveHasVariants === false) {
-        // If hasVariants is explicitly set to false, ensure variants array is empty
+        // Set main product price and stock to 0 for variant products
+        update.price = 0
+        update.originalPrice = undefined // Original price not applicable for main product with variants
+        update.stock = 0
+      } else {
+        // If hasVariants is explicitly set to false, ensure variants and variantAttributes arrays are empty
         if (update.variants && update.variants.length > 0) {
-          // Clear variants if hasVariants is set to false
           update.variants = []
-          this.setUpdate(update) // Update the internal update object
+          this.setUpdate(update)
           console.log("📝 PRE-UPDATE: Cleared variants array because hasVariants is false.")
+        }
+        if (update.variantAttributes && update.variantAttributes.length > 0) {
+          update.variantAttributes = []
+          this.setUpdate(update)
+          console.log("📝 PRE-UPDATE: Cleared variantAttributes array because hasVariants is false.")
+        }
+
+        // Handle main product stock logic based on shouldTrackQuantity
+        if (shouldTrackQuantity) {
+          // For non-variant products with quantity tracking enabled
+          if (update.stock === undefined || update.stock === null || update.stock === "") {
+            // If stock is not provided in update, set it to 0 or keep existing if it's a number
+            const currentStock = this.stock // Get existing stock from the document
+            if (typeof currentStock !== "number" || isNaN(currentStock)) {
+              update.stock = 0
+            } else {
+              update.stock = currentStock
+            }
+            this.setUpdate(update)
+            console.log(
+              "📝 PRE-UPDATE: Set main product stock to default/existing value for non-variant, tracked product.",
+            )
+          }
+        } else {
+          // If quantity tracking is disabled, ensure stock is unset for the main product
+          if (update.stock !== undefined) {
+            update.$unset = { ...update.$unset, stock: 1 }
+            delete update.stock // Remove stock from $set if it was there
+            this.setUpdate(update)
+            console.log("📝 PRE-UPDATE: Unset main product stock because quantity tracking is disabled.")
+          }
         }
       }
 
-      // Handle main product stock logic based on effectiveTrackQuantity and effectiveHasVariants
-      if (effectiveTrackQuantity === true && effectiveHasVariants === false) {
-        // For non-variant products with quantity tracking enabled
-        if (update.stock === undefined || update.stock === null || update.stock === "") {
-          // If stock is not provided in update, set it to 0 or keep existing if it's a number
-          const currentStock = this.stock // Get existing stock from the document
-          if (typeof currentStock !== "number" || isNaN(currentStock)) {
-            update.stock = 0
-          } else {
-            update.stock = currentStock
-          }
-          this.setUpdate(update)
-          console.log(
-            "📝 PRE-UPDATE: Set main product stock to default/existing value for non-variant, tracked product.",
-          )
-        }
-      } else if (effectiveTrackQuantity === false) {
-        // If quantity tracking is disabled, ensure stock is unset for the main product
-        if (update.stock !== undefined) {
-          update.$unset = { ...update.$unset, stock: 1 }
-          delete update.stock // Remove stock from $set if it was there
-          this.setUpdate(update)
-          console.log("📝 PRE-UPDATE: Unset main product stock because quantity tracking is disabled.")
-        }
-      } else if (effectiveHasVariants === true) {
-        // If hasVariants is true, ensure main product stock is 0 or unset
-        if (update.stock !== undefined) {
-          update.stock = 0
-          this.setUpdate(update)
-          console.log("📝 PRE-UPDATE: Set main product stock to 0 because hasVariants is true.")
-        }
-      }
+      // Update stock status based on the new state
+      // Note: updateStockStatus is an instance method, not directly usable here.
+      // The API route should handle setting stockStatus based on the final data.
+      // Or, we can trigger a post-update hook if needed. For now, rely on API route.
 
       next()
     } catch (error) {
@@ -795,11 +795,11 @@ module.exports = (tenantDB) => {
       $or: [
         {
           hasVariants: false,
-          stock: { $lte: this.schema.paths.lowStockAlert.default },
+          stock: { $lte: this.schema.paths.lowStockAlert.default() }, // Use default function
         },
         {
           hasVariants: true,
-          "variants.stock": { $lte: this.schema.paths.lowStockAlert.default },
+          "variants.stock": { $lte: this.schema.paths.lowStockAlert.default() }, // Use default function
         },
       ],
       isActive: true,

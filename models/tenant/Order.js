@@ -72,11 +72,13 @@ module.exports = (tenantDB) => {
       timestamps: true,
     },
   )
+
   orderSchema.index({ orderNumber: 1 })
   orderSchema.index({ customerId: 1 })
   orderSchema.index({ status: 1 })
   orderSchema.index({ paymentStatus: 1 })
   orderSchema.index({ createdAt: -1 })
+
   // Pre-save hook to generate order number
   orderSchema.pre("save", async function (next) {
     if (!this.orderNumber) {
@@ -85,5 +87,6 @@ module.exports = (tenantDB) => {
     }
     next()
   })
+
   return tenantDB.models.Order || tenantDB.model("Order", orderSchema)
 }

@@ -11,41 +11,43 @@ const app = express()
 const PORT = process.env.PORT || 5000
 
 const corsOptions = {
-  origin: (origin, callback) => {
-    // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) return callback(null, true)
-
-    // List of allowed origins
-    const allowedOrigins = [
-      "https://oneofwun.in",
-      "https://www.oneofwun.in",
-      "http://localhost:3000",
-      "http://localhost:3001",
-      "http://localhost:5000",
-      "https://api.yespstudio.com",
-      // Add any other frontend domains you need
-    ]
-
-    if (allowedOrigins.indexOf(origin) !== -1) {
-      callback(null, true)
-    } else {
-      console.log(`❌ CORS blocked origin: ${origin}`)
-      callback(new Error("Not allowed by CORS"))
-    }
-  },
+  origin: true, // This allows all origins
   credentials: true, // Allow cookies and authorization headers
   methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
   allowedHeaders: ["Origin", "X-Requested-With", "Content-Type", "Accept", "Authorization", "Cache-Control", "Pragma"],
   exposedHeaders: ["Authorization"],
   maxAge: 86400, // Cache preflight response for 24 hours
+  preflightContinue: false, // Ensure preflight requests are handled immediately
+  optionsSuccessStatus: 200, // Some legacy browsers choke on 204
 }
 
 // Middleware
 app.use(cors(corsOptions))
 
-app.options("*", cors(corsOptions))
+app.use((req, res, next) => {
+  if (req.method === "OPTIONS") {
+    console.log(`🔍 Preflight request for: ${req.originalUrl}`)
+    console.log(`🔍 Origin: ${req.get("origin")}`)
+    console.log(`🔍 Access-Control-Request-Method: ${req.get("Access-Control-Request-Method")}`)
+    console.log(`🔍 Access-Control-Request-Headers: ${req.get("Access-Control-Request-Headers")}`)
 
-// Enhanced JSON parsing with better error handling
+    const origin = req.get("origin")
+
+    // Allow all origins
+    res.header("Access-Control-Allow-Origin", origin || "*")
+    res.header("Access-Control-Allow-Credentials", "true")
+    res.header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,PATCH,OPTIONS")
+    res.header(
+      "Access-Control-Allow-Headers",
+      "Origin,X-Requested-With,Content-Type,Accept,Authorization,Cache-Control,Pragma",
+    )
+    res.header("Access-Control-Max-Age", "86400")
+    console.log(`✅ Preflight approved for origin: ${origin || "any"}`)
+    return res.status(200).end()
+  }
+  next()
+})
+
 app.use(
   express.json({
     limit: "10mb",

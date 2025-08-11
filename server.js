@@ -10,8 +10,40 @@ dotenv.config()
 const app = express()
 const PORT = process.env.PORT || 5000
 
+const corsOptions = {
+  origin: (origin, callback) => {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true)
+
+    // List of allowed origins
+    const allowedOrigins = [
+      "https://oneofwun.in",
+      "https://www.oneofwun.in",
+      "http://localhost:3000",
+      "http://localhost:3001",
+      "http://localhost:5000",
+      "https://api.yespstudio.com",
+      // Add any other frontend domains you need
+    ]
+
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true)
+    } else {
+      console.log(`❌ CORS blocked origin: ${origin}`)
+      callback(new Error("Not allowed by CORS"))
+    }
+  },
+  credentials: true, // Allow cookies and authorization headers
+  methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+  allowedHeaders: ["Origin", "X-Requested-With", "Content-Type", "Accept", "Authorization", "Cache-Control", "Pragma"],
+  exposedHeaders: ["Authorization"],
+  maxAge: 86400, // Cache preflight response for 24 hours
+}
+
 // Middleware
-app.use(cors())
+app.use(cors(corsOptions))
+
+app.options("*", cors(corsOptions))
 
 // Enhanced JSON parsing with better error handling
 app.use(

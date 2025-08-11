@@ -1,39 +1,39 @@
 const axios = require("axios")
-const { sendSmsViaTwilio, getTwilioClient } = require("./twilio")
+const { hasMsg91, sendSmsViaMsg91 } = require("./msg91")
 
-// Prefer Twilio SMS for all messages if configured.
-// Fallback to Fast2SMS (for India) if configured.
+// Prefer MSG91 for all SMS if configured.
+// Fallback to Fast2SMS if configured.
 // Otherwise dev-mode logs.
 
 const sendSMS = async (phone, message) => {
   try {
     console.log(`📱 Sending SMS to ${phone}: ${message}`)
 
-    // 1) Twilio preferred
-    const twilioClient = getTwilioClient()
-    if (twilioClient && (process.env.TWILIO_MESSAGING_SERVICE_SID || process.env.TWILIO_FROM_NUMBER)) {
+    // 1) MSG91 preferred
+    if (hasMsg91()) {
       try {
-        const res = await sendSmsViaTwilio(phone, message)
-        console.log("📱 Twilio SMS SID:", res.sid)
+        const res = await sendSmsViaMsg91(phone, message)
+        console.log("📱 MSG91 SMS sent:", res.messageId)
         return {
           success: true,
-          provider: "twilio",
-          messageId: res.sid,
+          provider: "msg91",
+          messageId: res.messageId,
+          details: res.data,
         }
-      } catch (twErr) {
-        console.error("❌ Twilio SMS error:", twErr.message)
-        // Try Fast2SMS (if available) before dev mode
+      } catch (err) {
+        console.error("❌ MSG91 SMS error:", err.message || err)
+        // Fall through to Fast2SMS if configured
       }
     }
 
-    // 2) Fast2SMS fallback (mostly for India)
+    // 2) Fast2SMS fallback (mainly for India)
     if (process.env.FAST2SMS_API_KEY) {
       const fast2smsUrl = "https://www.fast2sms.com/dev/bulkV2"
 
-      // Clean phone number (remove spaces)
+      // Clean phone number (remove spaces and +)
       let cleanPhone = String(phone).replace(/\s+/g, "").replace(/^\+/, "")
 
-      // Remove +91 if present with 12 digits
+      // Remove 91 if present with 12 digits
       if (cleanPhone.startsWith("91") && cleanPhone.length === 12) {
         cleanPhone = cleanPhone.substring(2)
       }
@@ -74,7 +74,7 @@ const sendSMS = async (phone, message) => {
 
     // 3) Dev mode
     console.log(`📱 DEV MODE - SMS to ${phone}: ${message}`)
-    console.log(`ℹ️ Configure Twilio or Fast2SMS to send real SMS.`)
+    console.log(`ℹ️ Configure MSG91 (preferred) or Fast2SMS to send real SMS.`)
     return {
       success: true,
       messageId: `dev_${Date.now()}`,
@@ -119,6 +119,26 @@ const testSMS = async (phone, testMessage = "Test message from your store") => {
   return result
 }
 
+const getSMSStatus = () => {
+  const msg91Configured = !!process.env.MSG91_AUTH_KEY
+  const fast2smsConfigured = !!process.env.FAST2SMS_API_KEY
+
+  return {
+    providerPreferred: msg91Configured ? "MSG91" : fast2smsConfigured ? "Fast2SMS" : "Development",
+    msg91: {
+      configured: msg91Configured,
+      senderId: process.env.MSG91_SENDER_ID || "Not set",
+      otpTemplateId: process.env.MSG91_OTP_TEMPLATE_ID ? "Set" : "Not set",
+      countryCode: process.env.MSG91_COUNTRY_CODE || "91",
+    },
+    fast2sms: {
+      configured: fast2smsConfigured,
+      apiKey: process.env.FAST2SMS_API_KEY ? process.env.FAST2SMS_API_KEY.substring(0, 10) + "..." : "Not set",
+      senderId: process.env.FAST2SMS_SENDER_ID || "Not set",
+    },
+  }
+}
+
 const validateFast2SMSConfig = () => {
   const apiKey = process.env.FAST2SMS_API_KEY
   if (!apiKey) {
@@ -126,8 +146,8 @@ const validateFast2SMSConfig = () => {
       valid: false,
       error: "FAST2SMS_API_KEY not found in environment variables",
       help: [
-        "1. Optionally configure Fast2SMS for fallback in India",
-        "2. Prefer Twilio: set TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN",
+        "1. Prefer MSG91 by setting MSG91_AUTH_KEY and MSG91_OTP_TEMPLATE_ID",
+        "2. Optionally configure Fast2SMS as a fallback for India",
       ],
     }
   }
@@ -139,26 +159,6 @@ const validateFast2SMSConfig = () => {
     }
   }
   return { valid: true, message: "Fast2SMS configuration looks valid" }
-}
-
-const getSMSStatus = () => {
-  const twilioConfigured = !!(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN)
-  const fast2smsConfigured = !!process.env.FAST2SMS_API_KEY
-
-  return {
-    providerPreferred: twilioConfigured ? "Twilio" : fast2smsConfigured ? "Fast2SMS" : "Development",
-    twilio: {
-      configured: twilioConfigured,
-      messagingServiceSid: process.env.TWILIO_MESSAGING_SERVICE_SID ? "Set" : "Not set",
-      fromNumber: process.env.TWILIO_FROM_NUMBER || "Not set",
-      verifyServiceSid: process.env.TWILIO_VERIFY_SERVICE_SID ? "Set" : "Not set",
-    },
-    fast2sms: {
-      configured: fast2smsConfigured,
-      apiKey: process.env.FAST2SMS_API_KEY ? process.env.FAST2SMS_API_KEY.substring(0, 10) + "..." : "Not set",
-    },
-    status: validateFast2SMSConfig(),
-  }
 }
 
 module.exports = {

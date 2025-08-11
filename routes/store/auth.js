@@ -3,6 +3,8 @@ const jwt = require("jsonwebtoken")
 const bcrypt = require("bcryptjs")
 const rateLimit = require("express-rate-limit")
 const AuthUtils = require("../../utils/auth")
+const { hasVerify, startVerify, checkVerify } = require("../../config/twilio")
+const { sendCustomerOTP } = require("../../config/sms")
 const router = express.Router({ mergeParams: true })
 
 // Apply rate limiting to authentication endpoints
@@ -19,6 +21,20 @@ const authRateLimit = rateLimit({
 })
 
 router.use(["/login", "/register"], authRateLimit)
+
+// OTP rate limit (stricter)
+const otpRateLimit = rateLimit({
+  windowMs: 10 * 60 * 1000, // 10 minutes
+  max: 5,
+  message: {
+    error: "Too many OTP requests",
+    code: "OTP_RATE_LIMIT_EXCEEDED",
+    retryAfter: "10 minutes",
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+})
+router.use("/otp", otpRateLimit)
 
 // Enhanced logging middleware
 router.use((req, res, next) => {
@@ -40,6 +56,221 @@ router.get("/test", (req, res) => {
   })
 })
 
+/**
+ * OTP endpoints using Twilio Verify (preferred) or SMS fallback with in-memory store.
+ */
+const inMemoryOtp = new Map() // DEV fallback: { phone: { code, expiresAt, purpose } }
+
+// Request OTP for phone-based login/registration
+router.post("/otp/request", async (req, res) => {
+  try {
+    const { phone, purpose = "login", channel = "sms" } = req.body
+
+    if (!phone) {
+      return res.status(400).json({
+        error: "Phone number is required",
+        code: "MISSING_PHONE",
+      })
+    }
+
+    if (!["login", "registration"].includes(purpose)) {
+      return res.status(400).json({
+        error: "Invalid purpose. Use 'login' or 'registration'.",
+        code: "INVALID_PURPOSE",
+      })
+    }
+
+    if (!AuthUtils.validatePhone(phone)) {
+      return res.status(400).json({
+        error: "Please enter a valid phone number",
+        code: "INVALID_PHONE",
+      })
+    }
+
+    // Ensure tenant and store context exist
+    if (!req.tenantId || !req.storeId) {
+      return res.status(500).json({
+        error: "Store context not initialized",
+        code: "STORE_CONTEXT_ERROR",
+      })
+    }
+
+    const storeName = req.storeInfo?.name || "Store"
+
+    if (hasVerify()) {
+      const result = await startVerify(phone, channel)
+      return res.json({
+        message: "OTP sent via Twilio Verify",
+        provider: "twilio-verify",
+        status: result.status,
+        purpose,
+        expiresIn: "10 minutes",
+      })
+    }
+
+    // Fallback: generate a 6-digit code and send via SMS
+    const code = ("" + Math.floor(100000 + Math.random() * 900000)).padStart(6, "0")
+    const expiresAt = Date.now() + 10 * 60 * 1000 // 10 minutes
+    inMemoryOtp.set(phone, { code, expiresAt, purpose })
+
+    await sendCustomerOTP(phone, code, storeName)
+
+    return res.json({
+      message: "OTP sent successfully",
+      provider: "sms",
+      purpose,
+      expiresIn: "10 minutes",
+      dev: !process.env.TWILIO_ACCOUNT_SID && !process.env.FAST2SMS_API_KEY ? { code } : undefined,
+    })
+  } catch (error) {
+    console.error("❌ Phone OTP request error:", error)
+    return res.status(500).json({
+      error: "Failed to send OTP",
+      details: error.message,
+      code: "OTP_REQUEST_ERROR",
+    })
+  }
+})
+
+// Verify OTP and login/register customer
+router.post("/otp/verify", async (req, res) => {
+  try {
+    const { phone, otp, purpose = "login", name, rememberMe } = req.body
+
+    if (!phone || !otp) {
+      return res.status(400).json({
+        error: "Phone and OTP are required",
+        code: "MISSING_FIELDS",
+      })
+    }
+
+    if (!AuthUtils.validatePhone(phone)) {
+      return res.status(400).json({
+        error: "Please enter a valid phone number",
+        code: "INVALID_PHONE",
+      })
+    }
+
+    if (!["login", "registration"].includes(purpose)) {
+      return res.status(400).json({
+        error: "Invalid purpose. Use 'login' or 'registration'.",
+        code: "INVALID_PURPOSE",
+      })
+    }
+
+    if (!req.tenantDB || !req.tenantId || !req.storeId) {
+      return res.status(500).json({
+        error: "Database or store context not initialized",
+        code: "STORE_CONTEXT_ERROR",
+      })
+    }
+
+    let verified = false
+    if (hasVerify()) {
+      const result = await checkVerify(phone, otp)
+      verified = result.valid
+    } else {
+      const record = inMemoryOtp.get(phone)
+      if (!record) {
+        return res.status(400).json({
+          error: "No OTP requested for this phone",
+          code: "NO_OTP_REQUEST",
+        })
+      }
+      if (record.expiresAt < Date.now()) {
+        inMemoryOtp.delete(phone)
+        return res.status(400).json({
+          error: "OTP expired",
+          code: "OTP_EXPIRED",
+        })
+      }
+      if (String(record.code) !== String(otp)) {
+        return res.status(400).json({
+          error: "Invalid OTP",
+          code: "INVALID_OTP",
+        })
+      }
+      verified = true
+      inMemoryOtp.delete(phone)
+    }
+
+    if (!verified) {
+      return res.status(400).json({
+        error: "OTP verification failed",
+        code: "OTP_VERIFICATION_FAILED",
+      })
+    }
+
+    const Customer = require("../../models/tenant/Customer")(req.tenantDB)
+
+    // Find existing customer by phone
+    let customer = await Customer.findOne({ phone })
+
+    if (!customer) {
+      // Auto-register phone-first customer
+      const fallbackName = name && name.trim().length >= 2 ? name.trim() : `Customer ${String(phone).slice(-4)}`
+      customer = new Customer({
+        name: fallbackName,
+        phone,
+        // No password required for phone-first
+        totalSpent: 0,
+        totalOrders: 0,
+        isActive: true,
+        isVerified: true,
+        emailVerified: false,
+        phoneVerified: true,
+        preferences: {
+          notifications: true,
+          marketing: false,
+          newsletter: true,
+          smsUpdates: !!phone,
+        },
+        lastLoginAt: new Date(),
+      })
+      await customer.save()
+      console.log(`👤 Phone-first customer created for ${phone}`)
+    } else {
+      // Mark phone verified and update last login
+      customer.phoneVerified = true
+      customer.isVerified = true
+      customer.lastLoginAt = new Date()
+      await customer.save()
+    }
+
+    const token = customer.generateAuthToken(req.storeId, req.tenantId, !!rememberMe)
+    const tokenExpiry = AuthUtils.formatTokenExpiry(token)
+
+    return res.json({
+      message: "Login successful",
+      method: "phone_otp",
+      token,
+      customer: {
+        id: customer._id,
+        name: customer.name,
+        email: customer.email,
+        phone: customer.phone,
+        totalSpent: customer.totalSpent,
+        totalOrders: customer.totalOrders,
+        lastOrderDate: customer.lastOrderDate,
+        addresses: customer.addresses || [],
+        preferences: customer.preferences || {},
+        tier: customer.tier,
+      },
+      storeId: req.storeId,
+      tenantId: req.tenantId,
+      tokenInfo: tokenExpiry,
+      expiresIn: rememberMe ? "365 days" : "90 days",
+    })
+  } catch (error) {
+    console.error("❌ Phone OTP verify error:", error)
+    return res.status(500).json({
+      error: "Failed to verify OTP",
+      details: error.message,
+      code: "OTP_VERIFY_ERROR",
+    })
+  }
+})
+
 // Enhanced customer registration with longer token expiration
 router.post("/register", async (req, res) => {
   try {
@@ -54,7 +285,7 @@ router.post("/register", async (req, res) => {
       errors.push("Name must be at least 2 characters long")
     }
 
-    if (!email || !AuthUtils.validateEmail(email)) {
+    if (email && !AuthUtils.validateEmail(email)) {
       errors.push("Valid email address is required")
     }
 
@@ -87,7 +318,7 @@ router.post("/register", async (req, res) => {
 
     // Check for existing customer
     const existingCustomer = await Customer.findOne({
-      $or: [{ email: email.toLowerCase() }, ...(phone ? [{ phone: phone }] : [])],
+      $or: [{ email: email?.toLowerCase() }, ...(phone ? [{ phone: phone }] : [])],
     })
 
     if (existingCustomer) {
@@ -114,14 +345,14 @@ router.post("/register", async (req, res) => {
     // Create new customer
     const customer = new Customer({
       name: name.trim(),
-      email: email.toLowerCase(),
+      email: email ? email.toLowerCase() : undefined,
       password: password, // Will be hashed by pre-save middleware
-      phone: phone || "",
+      phone: phone || undefined,
       totalSpent: 0,
       totalOrders: 0,
       isActive: true,
-      isVerified: true, // Auto-verify for now
-      emailVerified: true,
+      isVerified: !!email || !!phone,
+      emailVerified: !!email,
       phoneVerified: !!phone,
       preferences: {
         notifications: true,
@@ -132,7 +363,7 @@ router.post("/register", async (req, res) => {
     })
 
     await customer.save()
-    console.log(`👤 New customer registered: ${email}`)
+    console.log(`👤 New customer registered: ${email || phone}`)
 
     // Generate JWT token with longer expiration
     const token = customer.generateAuthToken(req.storeId, req.tenantId, rememberMe)
@@ -475,7 +706,7 @@ const authenticateCustomer = async (req, res, next) => {
       const newToken = customer.generateAuthToken(req.storeId, req.tenantId, false)
       res.setHeader("X-New-Token", newToken)
       res.setHeader("X-Token-Refreshed", "true")
-      console.log(`🔄 Token refreshed for customer: ${customer.email}`)
+      console.log(`🔄 Token refreshed for customer: ${customer.email || customer.phone}`)
     }
 
     req.customer = customer
@@ -635,7 +866,7 @@ router.put("/change-password", authenticateCustomer, async (req, res) => {
     customer.passwordChangedAt = new Date()
     await customer.save()
 
-    console.log(`🔐 Password changed for customer: ${customer.email}`)
+    console.log(`🔐 Password changed for customer: ${customer.email || customer.phone}`)
 
     res.json({
       message: "Password changed successfully. Please login again with your new password.",
@@ -684,7 +915,7 @@ router.get("/verify-token", authenticateCustomer, async (req, res) => {
 router.post("/logout", authenticateCustomer, async (req, res) => {
   try {
     // In a production app, you'd add the token to a blacklist
-    console.log(`🚪 Customer logged out: ${req.customer.email}`)
+    console.log(`🚪 Customer logged out: ${req.customer.email || req.customer.phone}`)
 
     res.json({
       message: "Logged out successfully",
@@ -941,7 +1172,7 @@ router.post("/reset-password", async (req, res) => {
     customer.passwordChangedAt = new Date()
     await customer.save()
 
-    console.log(`✅ Password reset completed for: ${customer.email}`)
+    console.log(`✅ Password reset completed for: ${customer.email || customer.phone}`)
 
     res.json({
       message: "Password reset successfully. You can now login with your new password.",
@@ -967,7 +1198,7 @@ router.post("/refresh-token", authenticateCustomer, async (req, res) => {
     const newToken = customer.generateAuthToken(req.storeId, req.tenantId, rememberMe)
     const tokenExpiry = AuthUtils.formatTokenExpiry(newToken)
 
-    console.log(`🔄 Token refreshed for customer: ${customer.email}`)
+    console.log(`🔄 Token refreshed for customer: ${customer.email || customer.phone}`)
 
     res.json({
       message: "Token refreshed successfully",

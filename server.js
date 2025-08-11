@@ -25,6 +25,24 @@ const corsOptions = {
 app.use(cors(corsOptions))
 
 app.use((req, res, next) => {
+  const origin = req.get("origin")
+  if (origin) {
+    res.header("Access-Control-Allow-Origin", origin)
+    res.header("Vary", "Origin")
+    res.header("Access-Control-Allow-Credentials", "true")
+    res.header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,PATCH,OPTIONS")
+    res.header(
+      "Access-Control-Allow-Headers",
+      "Origin,X-Requested-With,Content-Type,Accept,Authorization,Cache-Control,Pragma",
+    )
+  } else {
+    // Fallback for non-CORS requests
+    res.header("Access-Control-Allow-Origin", "*")
+  }
+  next()
+})
+
+app.use((req, res, next) => {
   if (req.method === "OPTIONS") {
     console.log(`🔍 Preflight request for: ${req.originalUrl}`)
     console.log(`🔍 Origin: ${req.get("origin")}`)

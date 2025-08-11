@@ -1,173 +1,15 @@
 const express = require("express")
-const router = express.Router({ mergeParams: true })
+const router = express.Router()
 
 // Import sub-routes
 const authRoutes = require("./store/auth")
 const ordersRoutes = require("./store/orders")
 const paymentsRoutes = require("./store/payments")
 
-// Import OTP provider functions
-const { hasMsg91, startOtp, hasVerify, startVerify, verifyOtp, checkVerify } = require("../otpProviders")
-
-// Small helper to normalize phone input (digits only)
-function normalizePhone(input) {
-  return String(input || "").trim()
-}
-
-// Shared validation for OTP requests
-function validateOtpRequestBody(req, res) {
-  const { phone } = req.body || {}
-  if (!phone) {
-    res.status(400).json({
-      success: false,
-      error: "Missing 'phone' in body",
-      code: "MISSING_FIELDS",
-    })
-    return false
-  }
-  return true
-}
-
-// POST /api/:storeId/auth/otp/request
-// Accepts: application/x-www-form-urlencoded or application/json
-router.post("/auth/otp/request", async (req, res) => {
-  try {
-    const storeId = req.params.storeId
-    const purpose = (req.body?.purpose || "login").toLowerCase()
-    const phone = normalizePhone(req.body?.phone)
-
-    if (!validateOtpRequestBody(req, res)) return
-
-    // Pick provider: prefer MSG91 if configured; else Twilio Verify; else 501
-    if (hasMsg91()) {
-      const result = await startOtp(phone, "sms", {
-        purpose,
-        storeName: req.storeInfo?.name || storeId,
-      })
-      return res.json({
-        success: true,
-        provider: "msg91",
-        message: "OTP sent successfully",
-        storeId,
-        purpose,
-        providerResponse: result?.data || null,
-      })
-    }
-
-    if (hasVerify()) {
-      const result = await startVerify(phone, "sms")
-      return res.json({
-        success: true,
-        provider: "twilio-verify",
-        message: "OTP sent successfully",
-        storeId,
-        purpose,
-        sid: result?.sid || null,
-        status: result?.status || null,
-      })
-    }
-
-    return res.status(501).json({
-      success: false,
-      error: "No OTP provider configured",
-      code: "PROVIDER_NOT_CONFIGURED",
-      hint: "Set MSG91_AUTH_KEY and MSG91_OTP_TEMPLATE_ID for MSG91, or TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_VERIFY_SERVICE_SID for Twilio Verify.",
-    })
-  } catch (err) {
-    console.error("❌ Store OTP request error:", err)
-    res.status(500).json({
-      success: false,
-      error: "Failed to send OTP",
-      details: process.env.NODE_ENV === "development" ? err.message : undefined,
-      code: "OTP_REQUEST_ERROR",
-    })
-  }
-})
-
-// POST /api/:storeId/auth/otp/verify
-// Body: { phone: string, code: string }
-router.post("/auth/otp/verify", async (req, res) => {
-  try {
-    const storeId = req.params.storeId
-    const phone = normalizePhone(req.body?.phone)
-    const code = String(req.body?.code || req.body?.otp || "").trim()
-
-    if (!phone || !code) {
-      return res.status(400).json({
-        success: false,
-        error: "Missing 'phone' or 'code' in body",
-        code: "MISSING_FIELDS",
-      })
-    }
-
-    if (hasMsg91()) {
-      const result = await verifyOtp(phone, code)
-      if (!result?.valid) {
-        return res.status(400).json({
-          success: false,
-          error: "Invalid or expired OTP",
-          code: "INVALID_OTP",
-          provider: "msg91",
-          providerResponse: result?.data || null,
-        })
-      }
-      return res.json({
-        success: true,
-        message: "OTP verified successfully",
-        provider: "msg91",
-        storeId,
-      })
-    }
-
-    if (hasVerify()) {
-      const result = await checkVerify(phone, code)
-      if (!result?.valid) {
-        return res.status(400).json({
-          success: false,
-          error: "Invalid or expired OTP",
-          code: "INVALID_OTP",
-          provider: "twilio-verify",
-          status: result?.status || null,
-        })
-      }
-      return res.json({
-        success: true,
-        message: "OTP verified successfully",
-        provider: "twilio-verify",
-        storeId,
-      })
-    }
-
-    return res.status(501).json({
-      success: false,
-      error: "No OTP provider configured",
-      code: "PROVIDER_NOT_CONFIGURED",
-    })
-  } catch (err) {
-    console.error("❌ Store OTP verify error:", err)
-    res.status(500).json({
-      success: false,
-      error: "OTP verification failed",
-      details: process.env.NODE_ENV === "development" ? err.message : undefined,
-      code: "OTP_VERIFY_ERROR",
-    })
-  }
-})
-
-// Optional: simple health route under store scope
-router.get("/health", (req, res) => {
-  res.json({
-    success: true,
-    storeId: req.params.storeId,
-    message: "Store routes OK",
-    timestamp: new Date().toISOString(),
-  })
-})
-
 // Add logging middleware for all store routes
 router.use((req, res, next) => {
   console.log(`🛍️ Store Route: ${req.method} ${req.originalUrl}`)
-  console.log(`🛍️ Store ID: ${req.params.storeId}`)
+  console.log(`🛍️ Store ID: ${req.storeId}`)
   console.log(`🛍️ Tenant ID: ${req.tenantId}`)
   console.log(`🛍️ Store Info:`, req.storeInfo?.name || "Unknown")
   next()
@@ -182,7 +24,7 @@ router.use("/payments", paymentsRoutes)
 router.get("/test", (req, res) => {
   res.json({
     message: "Store routes are working",
-    storeId: req.params.storeId,
+    storeId: req.storeId,
     tenantId: req.tenantId,
     storeName: req.storeInfo?.name || "Unknown Store",
     timestamp: new Date().toISOString(),
@@ -201,9 +43,6 @@ router.get("/test", (req, res) => {
       "POST /orders",
       "GET /orders",
       "POST /payments/create-order",
-      "POST /auth/otp/request",
-      "POST /auth/otp/verify",
-      "GET /health",
     ],
   })
 })

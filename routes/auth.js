@@ -1,1002 +1,853 @@
 const express = require("express")
-const jwt = require("jsonwebtoken")
 const bcrypt = require("bcryptjs")
-const User = require("../models/User")
-const PendingRegistration = require("../models/PendingRegistration")
-const OTP = require("../models/OTP")
-const { getTenantDB } = require("../config/tenantDB")
-const { sendOTPEmail, sendWelcomeEmail } = require("../config/email")
-const AuthUtils = require("../utils/auth")
-const router = express.Router()
+const rateLimit = require("express-rate-limit")
+const AuthUtils = require("../../utils/auth")
+const { verifyFirebaseToken, getFirebaseStatus, getFirebaseClientConfig } = require("../../config/firebase")
+const { hasMsg91, startOtp: startMsg91Otp, verifyOtp: verifyMsg91Otp } = require("../../config/msg91")
 
-// Cache for tenant models to prevent recompilation
-const tenantModels = {}
+const router = express.Router({ mergeParams: true })
 
-// Helper function to get tenant models safely
-const getTenantModels = async (tenantId) => {
-  if (tenantModels[tenantId]) {
-    console.log(`♻️ Reusing cached models for tenant: ${tenantId}`)
-    return tenantModels[tenantId]
-  }
+// Rate limiting
+const authRateLimit = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: {
+    error: "Too many authentication attempts",
+    code: "RATE_LIMIT_EXCEEDED",
+    retryAfter: "15 minutes",
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+})
 
-  console.log(`🔧 Creating new models for tenant: ${tenantId}`)
-  const tenantDB = await getTenantDB(tenantId)
+const otpRateLimit = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 5,
+  message: {
+    error: "Too many OTP requests",
+    code: "OTP_RATE_LIMIT_EXCEEDED",
+    retryAfter: "10 minutes",
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+})
 
-  const models = {
-    User: require("../models/tenant/User")(tenantDB),
-    Product: require("../models/tenant/Product")(tenantDB),
-    Order: require("../models/tenant/Order")(tenantDB),
-    Category: require("../models/tenant/Category")(tenantDB),
-    Customer: require("../models/tenant/Customer")(tenantDB),
-    Offer: require("../models/tenant/Offer")(tenantDB),
-    Payment: require("../models/tenant/Payment")(tenantDB),
-    Settings: require("../models/tenant/Settings")(tenantDB),
-  }
+router.use(["/login", "/register"], authRateLimit)
+router.use("/otp", otpRateLimit)
 
-  tenantModels[tenantId] = models
-  console.log(`✅ Models cached for tenant: ${tenantId}`)
-  return models
-}
-
-// Apply rate limiting to sensitive endpoints
-router.use(["/login", "/register/initiate", "/register/complete"], AuthUtils.authRateLimit)
-router.use(["/forgot-password", "/reset-password"], AuthUtils.passwordResetRateLimit)
-
-// Enhanced logging middleware
-router.use((req, res, next) => {
-  console.log(`📍 AUTH ROUTE: ${req.method} ${req.path}`)
-  console.log(`🔍 Client Info:`, AuthUtils.extractClientInfo(req))
-
-  if (req.method === "POST" && req.body) {
-    console.log(`📦 Request Body:`, {
-      ...req.body,
-      password: req.body.password ? "[HIDDEN]" : undefined,
-    })
-  }
+// Logging
+router.use((req, _res, next) => {
+  try {
+    const info = AuthUtils.extractClientInfo ? AuthUtils.extractClientInfo(req) : {}
+    console.log(`🔐 Store Auth: ${req.method} ${req.originalUrl}`)
+    console.log(`🔐 Store: ${req.storeId} | Tenant: ${req.tenantId} | Client:`, info)
+  } catch {}
   next()
 })
 
-// Helper functions
-const generateStoreId = async () => {
-  let storeId
-  let isUnique = false
-  while (!isUnique) {
-    storeId = Math.random().toString(36).substring(2, 8).toUpperCase()
-    const existingUser = await User.findOne({ storeId: storeId })
-    if (!existingUser) {
-      isUnique = true
-    }
-  }
-  return storeId
-}
+// Health/test
+router.get("/test", (req, res) => {
+  res.json({
+    message: "Store auth routes are working",
+    storeId: req.storeId,
+    tenantId: req.tenantId,
+    storeName: req.storeInfo?.name || "Unknown Store",
+    timestamp: new Date().toISOString(),
+  })
+})
 
-const generateTenantId = () => {
-  return `tenant_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`
-}
-
-// DEBUG ENDPOINT - Check what's in the database
-router.get("/debug/user/:email", async (req, res) => {
+/**
+ * OTP via MSG91
+ */
+router.post("/otp/request", async (req, res) => {
   try {
-    const { email } = req.params
-    console.log(`🔍 DEBUG: Looking for user: ${email}`)
+    const { phone, purpose = "login" } = req.body
 
-    const user = await User.findOne({ email: email.toLowerCase() })
+    if (!phone) return res.status(400).json({ error: "Phone number is required", code: "MISSING_PHONE" })
+    if (!["login", "registration"].includes(purpose)) {
+      return res.status(400).json({ error: "Invalid purpose. Use 'login' or 'registration'.", code: "INVALID_PURPOSE" })
+    }
+    if (!AuthUtils.validatePhone || !AuthUtils.validatePhone(phone)) {
+      return res.status(400).json({ error: "Please enter a valid phone number", code: "INVALID_PHONE" })
+    }
+    if (!req.tenantId || !req.storeId) {
+      return res.status(500).json({ error: "Store context not initialized", code: "STORE_CONTEXT_ERROR" })
+    }
 
-    if (!user) {
-      console.log(`❌ DEBUG: User not found: ${email}`)
+    if (!hasMsg91()) {
+      // Dev-mode: log a generated OTP
+      const devOtp = ("" + Math.floor(100000 + Math.random() * 900000)).padStart(6, "0")
+      console.log(`🧪 DEV OTP for ${phone}: ${devOtp}`)
       return res.json({
-        found: false,
-        message: "User not found in database",
+        message: "DEV MODE: OTP generated (check server logs)",
+        provider: "development",
+        purpose,
+        dev: { code: devOtp },
+        expiresIn: "10 minutes",
       })
     }
 
-    console.log(`✅ DEBUG: User found: ${email}`)
+    const storeName = req.storeInfo?.name || "Store"
+    const result = await startMsg91Otp(phone, "sms", { purpose, storeName })
 
-    res.json({
-      found: true,
-      user: {
-        email: user.email,
-        tenantId: user.tenantId,
-        storeId: user.storeId,
-        isActive: user.isActive,
-        emailVerified: user.emailVerified,
-        passwordHash: user.password.substring(0, 30) + "...",
-        createdAt: user.createdAt,
-        updatedAt: user.updatedAt,
+    return res.json({
+      message: "OTP sent via MSG91",
+      provider: "msg91",
+      purpose,
+      expiresIn: "10 minutes",
+      details: result.data,
+    })
+  } catch (error) {
+    const details = error?.response?.data || error.message || String(error)
+    console.error("❌ Phone OTP request error:", details)
+    return res.status(500).json({
+      error: "Failed to send OTP",
+      details: typeof details === "string" ? details : JSON.stringify(details),
+      code: "OTP_REQUEST_ERROR",
+    })
+  }
+})
+
+router.post("/otp/verify", async (req, res) => {
+  try {
+    const { phone, otp, purpose = "login", name, rememberMe } = req.body
+
+    if (!phone || !otp) return res.status(400).json({ error: "Phone and OTP are required", code: "MISSING_FIELDS" })
+    if (!AuthUtils.validatePhone || !AuthUtils.validatePhone(phone)) {
+      return res.status(400).json({ error: "Please enter a valid phone number", code: "INVALID_PHONE" })
+    }
+    if (!["login", "registration"].includes(purpose)) {
+      return res.status(400).json({ error: "Invalid purpose. Use 'login' or 'registration'.", code: "INVALID_PURPOSE" })
+    }
+    if (!req.tenantDB || !req.tenantId || !req.storeId) {
+      return res.status(500).json({ error: "Database or store context not initialized", code: "STORE_CONTEXT_ERROR" })
+    }
+
+    let verified = false
+    if (hasMsg91()) {
+      const result = await verifyMsg91Otp(phone, otp)
+      verified = result.valid
+      if (!verified) {
+        return res.status(400).json({
+          error: "OTP verification failed",
+          code: "OTP_VERIFICATION_FAILED",
+          details: result.data,
+        })
+      }
+    } else {
+      // Dev mode: accept 4-8 digit OTPs
+      if (!/^\d{4,8}$/.test(String(otp))) {
+        return res.status(400).json({ error: "Invalid OTP", code: "INVALID_OTP" })
+      }
+      verified = true
+    }
+
+    const Customer = require("../../models/tenant/Customer")(req.tenantDB)
+
+    // Find existing customer by phone
+    let customer = await Customer.findOne({ phone })
+
+    if (!customer) {
+      // Auto-register phone-first customer
+      const fallbackName = name && name.trim().length >= 2 ? name.trim() : `Customer ${String(phone).slice(-4)}`
+      customer = new Customer({
+        name: fallbackName,
+        phone,
+        totalSpent: 0,
+        totalOrders: 0,
+        isActive: true,
+        isVerified: true,
+        emailVerified: false,
+        phoneVerified: true,
+        preferences: {
+          notifications: true,
+          marketing: false,
+          newsletter: true,
+          smsUpdates: !!phone,
+        },
+        lastLoginAt: new Date(),
+      })
+      await customer.save()
+      console.log(`👤 Phone-first customer created for ${phone}`)
+    } else {
+      // Mark phone verified and update last login
+      customer.phoneVerified = true
+      customer.isVerified = true
+      customer.lastLoginAt = new Date()
+      await customer.save()
+    }
+
+    const token = customer.generateAuthToken(req.storeId, req.tenantId, !!rememberMe)
+    const tokenInfo = AuthUtils.formatTokenExpiry ? AuthUtils.formatTokenExpiry(token) : undefined
+
+    return res.json({
+      message: "Login successful",
+      method: "phone_otp",
+      token,
+      customer: {
+        id: customer._id,
+        name: customer.name,
+        email: customer.email,
+        phone: customer.phone,
+        totalSpent: customer.totalSpent,
+        totalOrders: customer.totalOrders,
+        lastOrderDate: customer.lastOrderDate,
+        addresses: customer.addresses || [],
+        preferences: customer.preferences || {},
+        tier: customer.tier,
       },
+      storeId: req.storeId,
+      tenantId: req.tenantId,
+      tokenInfo,
+      expiresIn: rememberMe ? "365 days" : "90 days",
     })
   } catch (error) {
-    console.error("❌ DEBUG error:", error)
-    res.status(500).json({
-      error: "Debug failed",
-      details: error.message,
+    const details = error?.response?.data || error.message || String(error)
+    console.error("❌ Phone OTP verify error:", details)
+    return res.status(500).json({
+      error: "Failed to verify OTP",
+      details: typeof details === "string" ? details : JSON.stringify(details),
+      code: "OTP_VERIFY_ERROR",
     })
   }
 })
 
-// DEBUG ENDPOINT - Check OTP status
-router.get("/debug/otp/:email/:purpose", async (req, res) => {
+/**
+ * Firebase Phone OTP: client verifies OTP with Firebase and sends ID token here.
+ */
+router.get("/otp/firebase/status", (req, res) => {
   try {
-    const { email, purpose } = req.params
-    console.log(`🔍 DEBUG: Checking OTP for ${email} (${purpose})`)
+    const status = getFirebaseStatus()
+    res.json({ provider: "firebase", status })
+  } catch (error) {
+    res.status(500).json({
+      error: "Failed to get Firebase status",
+      details: error.message,
+      code: "FIREBASE_STATUS_ERROR",
+    })
+  }
+})
 
-    const otpStatus = await OTP.getCurrentOTP(email, purpose)
+router.get("/otp/firebase/config", (req, res) => {
+  try {
+    const cfg = getFirebaseClientConfig()
+    if (!cfg.apiKey || !cfg.authDomain || !cfg.projectId) {
+      return res.status(404).json({
+        error: "Firebase web config is not set on the server",
+        code: "FIREBASE_WEB_CONFIG_MISSING",
+      })
+    }
+    // Only return the safe web config fields
+    res.json({
+      provider: "firebase",
+      config: cfg,
+    })
+  } catch (error) {
+    res.status(500).json({
+      error: "Failed to get Firebase client config",
+      details: error.message,
+      code: "FIREBASE_CONFIG_ERROR",
+    })
+  }
+})
 
-    if (!otpStatus) {
-      return res.json({
-        found: false,
-        message: "No OTP found for this email and purpose",
+router.post("/otp/firebase/verify", async (req, res) => {
+  try {
+    const { idToken, name, rememberMe } = req.body
+
+    if (!idToken) {
+      return res.status(400).json({
+        error: "idToken is required",
+        code: "MISSING_ID_TOKEN",
       })
     }
 
-    res.json({
-      found: true,
-      otp: otpStatus.otp,
-      expiresAt: otpStatus.expiresAt,
-      attempts: otpStatus.attempts,
-      createdAt: otpStatus.createdAt,
-      isExpired: otpStatus.expiresAt < new Date(),
-    })
-  } catch (error) {
-    console.error("❌ DEBUG OTP error:", error)
-    res.status(500).json({
-      error: "OTP debug failed",
-      details: error.message,
-    })
-  }
-})
-
-// DEBUG ENDPOINT - Test password comparison
-router.post("/debug/password-test", async (req, res) => {
-  try {
-    const { email, password } = req.body
-    console.log(`🔍 DEBUG: Testing password for: ${email}`)
-
-    const user = await User.findOne({ email: email.toLowerCase() })
-
-    if (!user) {
-      return res.json({
-        found: false,
-        message: "User not found",
+    if (!req.tenantDB || !req.tenantId || !req.storeId) {
+      return res.status(500).json({
+        error: "Store context not initialized",
+        code: "STORE_CONTEXT_ERROR",
       })
     }
 
-    console.log(`🔍 DEBUG: Found user, testing password...`)
-    console.log(`🔍 DEBUG: Provided password: "${password}"`)
-    console.log(`🔍 DEBUG: Stored hash: ${user.password.substring(0, 30)}...`)
+    // Verify Firebase token using Admin SDK
+    const result = await verifyFirebaseToken(idToken)
+    if (!result?.success) {
+      return res.status(401).json({
+        error: "Invalid Firebase token",
+        code: "FIREBASE_TOKEN_INVALID",
+        details: result?.error || "Verification failed",
+      })
+    }
 
-    const isMatch = await bcrypt.compare(password, user.password)
-    console.log(`🔑 DEBUG: Password match result: ${isMatch}`)
+    const phone = result.phone
+    const email = result.email
+    const displayName = result.name || name
+
+    if (!phone) {
+      return res.status(400).json({
+        error: "Firebase token does not contain a phone number",
+        code: "NO_PHONE_IN_TOKEN",
+      })
+    }
+
+    // Validate phone format for our system (expects E.164)
+    if (AuthUtils.validatePhone && !AuthUtils.validatePhone(phone)) {
+      return res.status(400).json({
+        error: "Phone number from Firebase is not in a valid format",
+        code: "INVALID_PHONE_FORMAT",
+      })
+    }
+
+    const Customer = require("../../models/tenant/Customer")(req.tenantDB)
+
+    // Find by phone
+    let customer = await Customer.findOne({ phone })
+
+    if (!customer) {
+      // Try email match (if provided) to merge accounts
+      if (email) {
+        const emailMatch = await Customer.findOne({ email: email.toLowerCase() })
+        if (emailMatch) {
+          // Attach phone to existing email account if phone not already set
+          if (!emailMatch.phone) {
+            emailMatch.phone = phone
+            emailMatch.phoneVerified = true
+            emailMatch.isVerified = true
+            emailMatch.lastLoginAt = new Date()
+            await emailMatch.save()
+            customer = emailMatch
+          } else {
+            // Conflicting phone; fallback to creating a phone-first account
+            console.warn("⚠️ Email exists with different phone; creating phone-first account")
+          }
+        }
+      }
+    }
+
+    if (!customer) {
+      const fallbackName =
+        displayName && displayName.trim().length >= 2 ? displayName.trim() : `Customer ${String(phone).slice(-4)}`
+      customer = new Customer({
+        name: fallbackName,
+        email: email ? email.toLowerCase() : undefined,
+        phone,
+        totalSpent: 0,
+        totalOrders: 0,
+        isActive: true,
+        isVerified: true,
+        emailVerified: !!email, // you may choose to set false if email isn't verified in Firebase
+        phoneVerified: true,
+        preferences: {
+          notifications: true,
+          marketing: false,
+          newsletter: true,
+          smsUpdates: true,
+        },
+        lastLoginAt: new Date(),
+      })
+      await customer.save()
+      console.log(`👤 Firebase phone customer created for ${phone}`)
+    } else {
+      // Update verification state and last login
+      customer.phoneVerified = true
+      customer.isVerified = true
+      if (email && !customer.email) {
+        // Only set email if not already present (avoid unique conflicts)
+        customer.email = email.toLowerCase()
+      }
+      customer.lastLoginAt = new Date()
+      await customer.save()
+    }
+
+    // Sign into our app
+    const token = customer.generateAuthToken(req.storeId, req.tenantId, !!rememberMe)
+    const tokenInfo = AuthUtils.formatTokenExpiry ? AuthUtils.formatTokenExpiry(token) : undefined
 
     res.json({
-      found: true,
-      passwordMatch: isMatch,
-      providedPassword: password,
-      storedHashPreview: user.password.substring(0, 30) + "...",
+      message: "Login successful via Firebase phone",
+      method: "firebase_phone",
+      token,
+      customer: {
+        id: customer._id,
+        name: customer.name,
+        email: customer.email,
+        phone: customer.phone,
+        totalSpent: customer.totalSpent,
+        totalOrders: customer.totalOrders,
+        addresses: customer.addresses || [],
+        preferences: customer.preferences || {},
+        tier: customer.tier,
+      },
+      storeId: req.storeId,
+      tenantId: req.tenantId,
+      tokenInfo,
+      expiresIn: rememberMe ? "365 days" : "90 days",
     })
   } catch (error) {
-    console.error("❌ DEBUG password test error:", error)
+    console.error("❌ Firebase OTP verify error:", error)
     res.status(500).json({
-      error: "Password test failed",
+      error: "Failed to verify Firebase OTP",
       details: error.message,
+      code: "FIREBASE_OTP_VERIFY_ERROR",
     })
   }
 })
 
-// Step 1: Initiate Registration (Send OTP)
-router.post("/register/initiate", async (req, res) => {
-  try {
-    const { name, email, phone, password } = req.body
-    console.log(`📝 Initiate registration request for: ${email}`)
+/**
+ * Email/password register, login, and authenticated utilities
+ */
 
-    // Enhanced validation
+// Register
+router.post("/register", async (req, res) => {
+  try {
+    const { name, email, password, phone, rememberMe } = req.body
     const errors = []
 
-    if (!name || name.trim().length < 2) {
-      errors.push("Name must be at least 2 characters long")
+    if (!name || name.trim().length < 2) errors.push("Name must be at least 2 characters long")
+    if (email && (!AuthUtils.validateEmail || !AuthUtils.validateEmail(email))) errors.push("Valid email is required")
+    if (!password) errors.push("Password is required")
+    else {
+      const pv = AuthUtils.validatePassword
+        ? AuthUtils.validatePassword(password)
+        : { isValid: password.length >= 6, errors: [] }
+      if (!pv.isValid) errors.push(...pv.errors)
+    }
+    if (phone && (!AuthUtils.validatePhone || !AuthUtils.validatePhone(phone))) errors.push("Valid phone is required")
+
+    if (errors.length) {
+      return res.status(400).json({ error: "Validation failed", details: errors, code: "VALIDATION" })
     }
 
-    if (!email || !AuthUtils.validateEmail(email)) {
-      errors.push("Please enter a valid email address")
+    if (!req.tenantDB || !req.tenantId || !req.storeId) {
+      return res.status(500).json({ error: "Database or store context not initialized", code: "STORE_CONTEXT_ERROR" })
     }
 
-    const passwordValidation = AuthUtils.validatePassword(password)
-    if (!passwordValidation.isValid) {
-      errors.push(...passwordValidation.errors)
+    const Customer = require("../../models/tenant/Customer")(req.tenantDB)
+
+    const existing = await Customer.findOne({
+      $or: [{ email: email?.toLowerCase() }, ...(phone ? [{ phone }] : [])],
+    })
+    if (existing) {
+      return res.status(400).json({ error: "Account already exists", code: "CUSTOMER_EXISTS" })
     }
 
-    if (phone && !AuthUtils.validatePhone(phone)) {
-      errors.push("Please enter a valid phone number")
-    }
-
-    if (errors.length > 0) {
-      return res.status(400).json({
-        error: "Validation failed",
-        details: errors,
-        code: "VALIDATION_ERROR",
-      })
-    }
-
-    // Check if user already exists
-    const existingUser = await User.findOne({ email: email.toLowerCase() })
-    if (existingUser) {
-      return res.status(400).json({
-        error: "User already exists with this email",
-        code: "USER_EXISTS",
-      })
-    }
-
-    // Clean up any existing pending registration and OTPs
-    await PendingRegistration.deleteOne({ email: email.toLowerCase() })
-    await OTP.deleteMany({ email: email.toLowerCase(), purpose: "registration" })
-
-    // Create new pending registration with PLAIN TEXT password (NO HASHING)
-    const pendingRegistration = new PendingRegistration({
+    const hashed = await bcrypt.hash(password, 12)
+    const customer = new Customer({
       name: name.trim(),
-      email: email.toLowerCase(),
-      phone: phone || "",
-      password: password, // Store PLAIN TEXT - will be hashed only when creating final User records
+      email: email ? email.toLowerCase() : undefined,
+      password: hashed,
+      phone: phone || undefined,
+      totalSpent: 0,
+      totalOrders: 0,
+      isActive: true,
+      isVerified: !!email || !!phone,
+      emailVerified: !!email,
+      phoneVerified: !!phone,
+      preferences: { notifications: true, marketing: false, newsletter: true, smsUpdates: !!phone },
     })
-    await pendingRegistration.save()
-    console.log(`⏳ Pending registration created for: ${email} (password stored as plain text)`)
+    await customer.save()
 
-    // Generate and send OTP
-    const otp = await OTP.createOTP(email, "registration", AuthUtils.extractClientInfo(req))
-    await sendOTPEmail(email, otp, "registration")
-    console.log(`🔢 Generated and sent OTP for ${email}: ${otp}`)
+    const token = customer.generateAuthToken(req.storeId, req.tenantId, !!rememberMe)
+    const tokenInfo = AuthUtils.formatTokenExpiry ? AuthUtils.formatTokenExpiry(token) : undefined
 
-    res.json({
-      message: "OTP sent successfully to your email. Please verify to complete registration.",
-      email,
-      expiresIn: "10 minutes",
-      debug: {
-        otpSent: otp, // Remove this in production
+    res.status(201).json({
+      message: "Registration successful",
+      token,
+      customer: {
+        id: customer._id,
+        name: customer.name,
+        email: customer.email,
+        phone: customer.phone,
+        totalSpent: customer.totalSpent,
+        totalOrders: customer.totalOrders,
+        isVerified: customer.isVerified,
+        preferences: customer.preferences,
       },
+      storeId: req.storeId,
+      tenantId: req.tenantId,
+      tokenInfo,
+      expiresIn: rememberMe ? "365 days" : "90 days",
     })
   } catch (error) {
-    console.error("❌ Initiate registration error:", error)
-    res.status(500).json({
-      error: "Registration initiation failed",
-      details: error.message,
-      code: "REGISTRATION_ERROR",
-    })
+    console.error("❌ Customer registration error:", error)
+    if (error.code === 11000) {
+      const field = Object.keys(error.keyPattern || {})[0] || "field"
+      return res
+        .status(400)
+        .json({ error: `An account with this ${field} already exists`, code: "DUPLICATE_FIELD", field })
+    }
+    res.status(500).json({ error: "Failed to register customer", details: error.message, code: "REGISTRATION_ERROR" })
   }
 })
 
-// Step 2: Complete Registration (Verify OTP and Create User)
-router.post("/register/complete", async (req, res) => {
-  try {
-    const { email, otp } = req.body
-    console.log(`✅ Complete registration request for: ${email}`)
-
-    if (!email || !otp) {
-      return res.status(400).json({
-        error: "Email and OTP are required",
-        code: "MISSING_FIELDS",
-      })
-    }
-
-    // Check if OTP exists first (for debugging)
-    const otpStatus = await OTP.getCurrentOTP(email, "registration")
-    console.log(`🔍 Current OTP status for ${email}:`, otpStatus)
-
-    if (!otpStatus) {
-      return res.status(400).json({
-        error: "No OTP found. Please request a new OTP by initiating registration again.",
-        code: "NO_OTP_FOUND",
-      })
-    }
-
-    // Verify OTP
-    const otpVerification = await OTP.verifyOTP(email, otp, "registration")
-    if (!otpVerification.success) {
-      return res.status(400).json({
-        error: otpVerification.message,
-        code: otpVerification.code,
-      })
-    }
-
-    // Retrieve pending registration details
-    const pendingRegistration = await PendingRegistration.findOne({ email: email.toLowerCase() })
-    if (!pendingRegistration) {
-      return res.status(400).json({
-        error: "No pending registration found or it has expired. Please initiate registration again.",
-        code: "NO_PENDING_REGISTRATION",
-      })
-    }
-
-    // Double check if user already exists
-    const existingUser = await User.findOne({ email: email.toLowerCase() })
-    if (existingUser) {
-      await PendingRegistration.deleteOne({ email: email.toLowerCase() })
-      return res.status(400).json({
-        error: "User already exists with this email",
-        code: "USER_EXISTS",
-      })
-    }
-
-    const { name, phone, password: plainTextPassword } = pendingRegistration
-    console.log(`🔍 Retrieved plain text password from pending registration for: ${email}`)
-
-    // Generate tenant ID
-    const tenantId = generateTenantId()
-    console.log(`🏗️ Creating tenant: ${tenantId} for user: ${email}`)
-
-    try {
-      // Get tenant models (this handles DB connection and model compilation)
-      const models = await getTenantModels(tenantId)
-      console.log(`✅ Tenant models ready: ${tenantId}`)
-
-      // Create user in tenant DB with PLAIN TEXT password (will be hashed by pre-save middleware)
-      const tenantUser = new models.User({
-        name,
-        email: email.toLowerCase(),
-        phone,
-        password: plainTextPassword, // Plain text - will be hashed by pre-save middleware
-        role: "owner",
-        hasStore: false,
-        emailVerified: true,
-      })
-
-      await tenantUser.save()
-      console.log(`👤 Tenant user created with hashed password: ${email}`)
-
-      // Create user in main DB with PLAIN TEXT password (will be hashed by pre-save middleware)
-      const mainUser = new User({
-        email: email.toLowerCase(),
-        password: plainTextPassword, // Plain text - will be hashed by pre-save middleware
-        tenantId,
-        emailVerified: true, // Email is verified through OTP
-      })
-
-      await mainUser.save()
-      console.log(`🔑 Main user created with hashed password: ${email}`)
-
-      // Create default settings
-      const defaultSettings = new models.Settings({
-        general: {
-          storeName: "",
-          logo: "",
-          banner: "",
-          tagline: "Welcome to our store",
-          supportEmail: email,
-          supportPhone: phone,
-        },
-        payment: {
-          codEnabled: true,
-        },
-        social: {
-          instagram: "",
-          whatsapp: phone,
-          facebook: "",
-        },
-        shipping: {
-          deliveryTime: "2-3 business days",
-          charges: 50,
-          freeShippingAbove: 500,
-        },
-      })
-      await defaultSettings.save()
-      console.log(`⚙️ Default settings created for tenant: ${tenantId}`)
-
-      // Create default category
-      const defaultCategory = new models.Category({
-        name: "General",
-        description: "General products category",
-        isActive: true,
-      })
-      await defaultCategory.save()
-      console.log(`🗂️ Default category created for tenant: ${tenantId}`)
-
-      // Send welcome email
-      try {
-        await sendWelcomeEmail(email, name)
-      } catch (emailError) {
-        console.error("❌ Welcome email failed:", emailError)
-        // Don't fail registration if email fails
-      }
-
-      // Delete the pending registration record
-      await PendingRegistration.deleteOne({ email: email.toLowerCase() })
-      console.log(`🗑️ Pending registration deleted for: ${email}`)
-
-      // Generate JWT with tenant info
-      const token = AuthUtils.generateToken({
-        userId: tenantUser._id,
-        tenantId: tenantId,
-        email: email,
-        type: "admin",
-      })
-
-      res.status(201).json({
-        message: "User registered successfully",
-        token,
-        tenantId,
-        user: AuthUtils.sanitizeUser(tenantUser),
-        status: "no_store",
-      })
-    } catch (dbError) {
-      console.error(`❌ Tenant setup error for ${tenantId}:`, dbError)
-      throw new Error(`Failed to setup tenant: ${dbError.message}`)
-    }
-  } catch (error) {
-    console.error("❌ Complete registration error:", error)
-    res.status(500).json({
-      error: "Registration completion failed",
-      details: error.message,
-      code: "REGISTRATION_COMPLETION_ERROR",
-    })
-  }
-})
-
-// DIRECT LOGIN - Check Main DB then Connect to Tenant DB
+// Login
 router.post("/login", async (req, res) => {
   try {
-    console.log("🔐 DIRECT LOGIN attempt started")
-
     const { email, password, rememberMe } = req.body
-
-    // Validate input
-    if (!email || !password) {
-      console.log("❌ Missing email or password")
-      return res.status(400).json({
-        error: "Email and password are required",
-        code: "MISSING_CREDENTIALS",
-      })
+    if (!email || !password) return res.status(400).json({ error: "Email and password are required", code: "MISSING" })
+    if (!AuthUtils.validateEmail || !AuthUtils.validateEmail(email)) {
+      return res.status(400).json({ error: "Please enter a valid email address", code: "INVALID_EMAIL" })
     }
-
-    if (!AuthUtils.validateEmail(email)) {
-      return res.status(400).json({
-        error: "Please enter a valid email address",
-        code: "INVALID_EMAIL",
-      })
+    if (!req.tenantDB || !req.tenantId || !req.storeId) {
+      return res.status(500).json({ error: "Database not initialized", code: "DB_NOT_INITIALIZED" })
     }
+    const Customer = require("../../models/tenant/Customer")(req.tenantDB)
+    const customer = await Customer.findOne({ email: email.toLowerCase() })
+    if (!customer) return res.status(401).json({ error: "Invalid credentials", code: "INVALID_CREDENTIALS" })
+    const ok = await bcrypt.compare(password, customer.password || "")
+    if (!ok) return res.status(401).json({ error: "Invalid credentials", code: "INVALID_CREDENTIALS" })
 
-    console.log(`🔍 DIRECT: Looking for user in main DB: ${email}`)
+    customer.lastLoginAt = new Date()
+    await customer.save()
 
-    // Step 1: Find user in main database
-    const mainUser = await User.findOne({
-      email: email.toLowerCase().trim(),
-      isActive: true,
-    })
+    const token = customer.generateAuthToken(req.storeId, req.tenantId, !!rememberMe)
+    const tokenInfo = AuthUtils.formatTokenExpiry ? AuthUtils.formatTokenExpiry(token) : undefined
 
-    if (!mainUser) {
-      console.log(`❌ DIRECT: User not found in main DB: ${email}`)
-      return res.status(401).json({
-        error: "Invalid email or password",
-        code: "INVALID_CREDENTIALS",
-      })
-    }
-
-    console.log(`✅ DIRECT: Found main user: ${email}`)
-    console.log(`🔍 DIRECT: Main user tenantId: ${mainUser.tenantId}`)
-    console.log(`🔍 DIRECT: Main user password hash: ${mainUser.password.substring(0, 20)}...`)
-
-    // Step 2: Verify password directly using bcrypt
-    console.log(`🔍 DIRECT: Comparing password for: ${email}`)
-    console.log(`🔍 DIRECT: Provided password: "${password}"`)
-
-    const isPasswordValid = await bcrypt.compare(password, mainUser.password)
-    console.log(`🔑 DIRECT: Password comparison result: ${isPasswordValid}`)
-
-    if (!isPasswordValid) {
-      console.log(`❌ DIRECT: Password mismatch for: ${email}`)
-      return res.status(401).json({
-        error: "Invalid email or password",
-        code: "INVALID_CREDENTIALS",
-      })
-    }
-
-    console.log(`✅ DIRECT: Password verified for: ${email}`)
-
-    // Step 3: Get tenant models (this handles DB connection safely)
-    console.log(`🔍 DIRECT: Getting tenant models for: ${mainUser.tenantId}`)
-
-    const models = await getTenantModels(mainUser.tenantId)
-    console.log(`✅ DIRECT: Got tenant models for: ${mainUser.tenantId}`)
-
-    // Step 4: Get tenant user data
-    const tenantUser = await models.User.findOne({
-      email: email.toLowerCase().trim(),
-    })
-
-    if (!tenantUser) {
-      console.log(`❌ DIRECT: Tenant user not found: ${email}`)
-      return res.status(400).json({
-        error: "User data not found in tenant database",
-        code: "TENANT_USER_NOT_FOUND",
-      })
-    }
-
-    if (!tenantUser.isActive) {
-      console.log(`❌ DIRECT: Tenant user is inactive: ${email}`)
-      return res.status(401).json({
-        error: "User account is inactive",
-        code: "USER_INACTIVE",
-      })
-    }
-
-    console.log(`✅ DIRECT: Found tenant user: ${email}`)
-
-    // Step 5: Update last login time
-    tenantUser.lastLoginAt = new Date()
-    await tenantUser.save()
-
-    // Step 6: Generate JWT token
-    const token = AuthUtils.generateToken(
-      {
-        userId: tenantUser._id,
-        tenantId: mainUser.tenantId,
-        email: email.toLowerCase(),
-        type: "admin",
-      },
-      rememberMe ? "90d" : "7d",
-    )
-
-    // Step 7: Prepare response
-    const expiresIn = rememberMe ? "90d" : "7d"
-    const response = {
+    res.json({
       message: "Login successful",
       token,
-      tenantId: mainUser.tenantId,
-      storeId: mainUser.storeId || null,
-      hasStore: tenantUser.hasStore || false,
-      user: AuthUtils.sanitizeUser(tenantUser),
-      expiresIn,
-      tokenExpiry: AuthUtils.getTokenExpiry(token),
-    }
-
-    console.log(`✅ DIRECT: Login successful for: ${email}`)
-    console.log(`🎉 DIRECT: Response prepared with token and user data`)
-
-    res.json(response)
-  } catch (error) {
-    console.error("❌ DIRECT LOGIN error:", error)
-    res.status(500).json({
-      error: "Login failed",
-      details: error.message,
-      code: "LOGIN_ERROR",
+      customer: {
+        id: customer._id,
+        name: customer.name,
+        email: customer.email,
+        phone: customer.phone,
+        totalSpent: customer.totalSpent,
+        totalOrders: customer.totalOrders,
+        addresses: customer.addresses || [],
+        preferences: customer.preferences || {},
+        tier: customer.tier,
+      },
+      storeId: req.storeId,
+      tenantId: req.tenantId,
+      tokenInfo,
+      expiresIn: rememberMe ? "365 days" : "90 days",
     })
+  } catch (error) {
+    console.error("❌ Customer login error:", error)
+    res.status(500).json({ error: "Failed to login", details: error.message, code: "LOGIN_ERROR" })
   }
 })
 
-// Forgot Password
-router.post("/forgot-password", async (req, res) => {
+/**
+ * Authenticated utilities (middleware, profile, addresses, token)
+ */
+const authenticateCustomer = async (req, res, next) => {
   try {
-    const { email } = req.body
-
-    console.log(`🔐 Password reset request for: ${email}`)
-
-    if (!email || !AuthUtils.validateEmail(email)) {
-      return res.status(400).json({
-        error: "Valid email address is required",
-        code: "INVALID_EMAIL",
-      })
+    const authHeader = req.header("Authorization")
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({ error: "Access denied. Please login.", code: "NO_TOKEN" })
     }
-
-    // Check if user exists
-    const user = await User.findOne({ email: email.toLowerCase(), isActive: true })
-
-    // Always return success for security (don't reveal if email exists)
-    const successResponse = {
-      message: "If an account with this email exists, a password reset code has been sent.",
-      email,
-    }
-
-    if (!user) {
-      console.log(`❌ User not found for password reset: ${email}`)
-      return res.json(successResponse)
-    }
-
-    // Generate and send OTP
-    const otp = await OTP.createOTP(email, "password_reset", AuthUtils.extractClientInfo(req))
-    await sendOTPEmail(email, otp, "password reset")
-
-    console.log(`🔐 Password reset OTP sent for ${email}`)
-
-    res.json(successResponse)
-  } catch (error) {
-    console.error("❌ Forgot password error:", error)
-    res.status(500).json({
-      error: "Password reset request failed",
-      details: error.message,
-      code: "PASSWORD_RESET_ERROR",
-    })
-  }
-})
-
-// Verify Reset OTP
-router.post("/verify-reset-otp", async (req, res) => {
-  try {
-    const { email, otp } = req.body
-
-    console.log(`🔍 Verifying reset OTP for: ${email}`)
-
-    if (!email || !otp) {
-      return res.status(400).json({
-        error: "Email and OTP are required",
-        code: "MISSING_FIELDS",
-      })
-    }
-
-    // Check OTP without consuming it
-    const otpCheck = await OTP.checkOTP(email, otp, "password_reset")
-
-    if (!otpCheck.success) {
-      return res.status(400).json({
-        error: otpCheck.message,
-        code: otpCheck.code,
-      })
-    }
-
-    // Check if user still exists
-    const user = await User.findOne({ email: email.toLowerCase(), isActive: true })
-    if (!user) {
-      return res.status(404).json({
-        error: "User not found",
-        code: "USER_NOT_FOUND",
-      })
-    }
-
-    console.log(`✅ Password reset OTP verified for ${email}`)
-
-    res.json({
-      message: "OTP verified successfully. You can now reset your password.",
-      verified: true,
-      email,
-    })
-  } catch (error) {
-    console.error("❌ Verify reset OTP error:", error)
-    res.status(500).json({
-      error: "OTP verification failed",
-      details: error.message,
-      code: "OTP_VERIFICATION_ERROR",
-    })
-  }
-})
-
-// Reset Password
-router.post("/reset-password", async (req, res) => {
-  try {
-    const { email, otp, newPassword } = req.body
-
-    console.log(`🔐 Password reset attempt for: ${email}`)
-
-    if (!email || !otp || !newPassword) {
-      return res.status(400).json({
-        error: "Email, OTP, and new password are required",
-        code: "MISSING_FIELDS",
-      })
-    }
-
-    // Validate new password
-    const passwordValidation = AuthUtils.validatePassword(newPassword)
-    if (!passwordValidation.isValid) {
-      return res.status(400).json({
-        error: "Password validation failed",
-        details: passwordValidation.errors,
-        code: "INVALID_PASSWORD",
-      })
-    }
-
-    // Verify and consume OTP
-    const otpVerification = await OTP.verifyOTP(email, otp, "password_reset")
-    if (!otpVerification.success) {
-      return res.status(400).json({
-        error: otpVerification.message,
-        code: otpVerification.code,
-      })
-    }
-
-    // Find user in main DB
-    const mainUser = await User.findOne({ email: email.toLowerCase(), isActive: true })
-    if (!mainUser) {
-      console.log(`❌ User not found in main DB: ${email}`)
-      return res.status(404).json({
-        error: "User not found",
-        code: "USER_NOT_FOUND",
-      })
-    }
-
-    console.log(`👤 Found user in main DB: ${email}, tenantId: ${mainUser.tenantId}`)
-
-    // Update password in main DB
-    mainUser.password = newPassword // Will be hashed by pre-save middleware
-    mainUser.passwordChangedAt = new Date()
-    await mainUser.save()
-    console.log(`✅ Password updated in main DB for ${email}`)
-
-    // Update password in tenant DB as well
+    const token = authHeader.replace("Bearer ", "")
+    let decoded
     try {
-      const models = await getTenantModels(mainUser.tenantId)
-      const tenantUser = await models.User.findOne({ email: email.toLowerCase() })
-
-      if (tenantUser) {
-        tenantUser.password = newPassword // Will be hashed by pre-save middleware
-        tenantUser.passwordChangedAt = new Date()
-        await tenantUser.save()
-        console.log(`✅ Password updated in tenant DB for ${email}`)
-      } else {
-        console.log(`⚠️ Tenant user not found for ${email}`)
+      decoded = AuthUtils.verifyToken(token)
+    } catch (tokenError) {
+      if (tokenError.name === "TokenExpiredError") {
+        return res.status(401).json({
+          error: "Session expired. Please login again.",
+          code: "TOKEN_EXPIRED",
+          expiredAt: tokenError.expiredAt,
+        })
       }
-    } catch (tenantError) {
-      console.error("❌ Error updating tenant password:", tenantError)
-      // Don't fail the request if tenant update fails
+      return res.status(401).json({ error: "Invalid session. Please login again.", code: "TOKEN_INVALID" })
+    }
+    if (decoded.type !== "customer")
+      return res.status(401).json({ error: "Invalid token type", code: "INVALID_TOKEN_TYPE" })
+    if (decoded.storeId !== req.storeId) {
+      return res
+        .status(401)
+        .json({ error: "Access denied. Token is not valid for this store.", code: "INVALID_STORE_CONTEXT" })
+    }
+    if (!req.tenantDB) return res.status(500).json({ error: "Database not initialized", code: "DB_NOT_INITIALIZED" })
+
+    const Customer = require("../../models/tenant/Customer")(req.tenantDB)
+    const customer = await Customer.findById(decoded.customerId)
+    if (!customer) return res.status(401).json({ error: "Customer not found", code: "CUSTOMER_NOT_FOUND" })
+    if (!customer.isActive)
+      return res.status(401).json({ error: "Account is deactivated", code: "ACCOUNT_DEACTIVATED" })
+
+    if (customer.password && customer.passwordChangedAt && decoded.iat) {
+      const pwdChangedAt = Math.floor(customer.passwordChangedAt.getTime() / 1000)
+      if (pwdChangedAt > decoded.iat) {
+        return res.status(401).json({ error: "Password was changed. Please login again.", code: "PASSWORD_CHANGED" })
+      }
     }
 
-    console.log(`✅ Password reset completed for ${email}`)
+    if (AuthUtils.shouldRefreshToken && AuthUtils.shouldRefreshToken(token)) {
+      const newToken = customer.generateAuthToken(req.storeId, req.tenantId, false)
+      res.setHeader("X-New-Token", newToken)
+      res.setHeader("X-Token-Refreshed", "true")
+      console.log(`🔄 Token refreshed for customer: ${customer.email || customer.phone}`)
+    }
 
+    req.customer = customer
+    req.customerId = customer._id
+    req.authToken = token
+    req.tokenPayload = decoded
+    next()
+  } catch (error) {
+    console.error("❌ Customer auth middleware error:", error)
+    res.status(500).json({ error: "Authentication failed", code: "AUTH_ERROR" })
+  }
+}
+
+router.get("/profile", authenticateCustomer, async (req, res) => {
+  try {
+    const c = req.customer
+    const tokenInfo = AuthUtils.formatTokenExpiry ? AuthUtils.formatTokenExpiry(req.authToken) : undefined
     res.json({
-      message: "Password reset successfully. You can now login with your new password.",
-      success: true,
+      message: "Profile retrieved successfully",
+      customer: {
+        id: c._id,
+        name: c.name,
+        email: c.email,
+        phone: c.phone,
+        dateOfBirth: c.dateOfBirth,
+        gender: c.gender,
+        totalSpent: c.totalSpent,
+        totalOrders: c.totalOrders,
+        loyaltyPoints: c.loyaltyPoints,
+        tier: c.tier,
+        lastOrderDate: c.lastOrderDate,
+        addresses: c.addresses || [],
+        preferences: c.preferences || {},
+        isVerified: c.isVerified,
+        emailVerified: c.emailVerified,
+        phoneVerified: c.phoneVerified,
+        createdAt: c.createdAt,
+        lastLoginAt: c.lastLoginAt,
+      },
+      tokenInfo,
     })
   } catch (error) {
-    console.error("❌ Reset password error:", error)
-    res.status(500).json({
-      error: "Password reset failed",
-      details: error.message,
-      code: "PASSWORD_RESET_FAILED",
-    })
+    console.error("❌ Get profile error:", error)
+    res.status(500).json({ error: "Failed to get profile", details: error.message, code: "PROFILE_ERROR" })
   }
 })
 
-// Setup Store
-router.post("/setup-store", async (req, res) => {
+router.put("/profile", authenticateCustomer, async (req, res) => {
   try {
-    const authHeader = req.header("Authorization")
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      return res.status(401).json({
-        error: "Access denied. No valid token provided.",
-        code: "NO_TOKEN",
-      })
+    const { name, phone, dateOfBirth, gender, preferences } = req.body
+    const c = req.customer
+
+    if (name && name.trim().length < 2) {
+      return res.status(400).json({ error: "Name must be at least 2 characters long", code: "INVALID_NAME" })
+    }
+    if (phone && (!AuthUtils.validatePhone || !AuthUtils.validatePhone(phone))) {
+      return res.status(400).json({ error: "Valid phone number is required", code: "INVALID_PHONE" })
+    }
+    if (dateOfBirth && new Date(dateOfBirth) > new Date()) {
+      return res.status(400).json({ error: "Date of birth cannot be in the future", code: "INVALID_DATE_OF_BIRTH" })
+    }
+    if (gender && !["male", "female", "other"].includes(gender)) {
+      return res.status(400).json({ error: "Gender must be male, female, or other", code: "INVALID_GENDER" })
     }
 
-    const token = authHeader.replace("Bearer ", "")
-    let decoded
+    if (name) c.name = name.trim()
+    if (phone) c.phone = phone
+    if (dateOfBirth) c.dateOfBirth = new Date(dateOfBirth)
+    if (gender) c.gender = gender
+    if (preferences) c.preferences = { ...c.preferences, ...preferences }
 
-    try {
-      decoded = AuthUtils.verifyToken(token)
-    } catch (tokenError) {
-      return res.status(401).json({
-        error: "Invalid or expired token",
-        code: "INVALID_TOKEN",
-      })
-    }
-
-    // Get main user for tenant lookup
-    const mainUser = await User.findOne({ email: decoded.email, isActive: true })
-    if (!mainUser) {
-      return res.status(404).json({
-        error: "User not found",
-        code: "USER_NOT_FOUND",
-      })
-    }
-
-    // Get tenant models
-    const models = await getTenantModels(mainUser.tenantId)
-    const tenantUser = await models.User.findById(decoded.userId)
-
-    if (!tenantUser) {
-      return res.status(404).json({
-        error: "Tenant user not found",
-        code: "TENANT_USER_NOT_FOUND",
-      })
-    }
-
-    if (tenantUser.hasStore) {
-      return res.status(400).json({
-        error: "Store already exists for this user",
-        code: "STORE_EXISTS",
-      })
-    }
-
-    const { storeName, logo, banner, industry } = req.body
-
-    // Validate store name
-    if (!storeName || storeName.trim().length < 2) {
-      return res.status(400).json({
-        error: "Store name must be at least 2 characters long",
-        code: "INVALID_STORE_NAME",
-      })
-    }
-
-    // Generate unique store ID
-    const storeId = await generateStoreId()
-    console.log(`🏪 Setting up store with ID: ${storeId} for tenant: ${mainUser.tenantId}`)
-
-    // Update tenant user with store info
-    tenantUser.hasStore = true
-    tenantUser.storeInfo = {
-      name: storeName.trim(),
-      logo: logo || "",
-      banner: banner || "",
-      storeId: storeId,
-      industry: industry || "General",
-      isActive: true,
-    }
-    await tenantUser.save()
-
-    // Update main user with store ID
-    mainUser.storeId = storeId
-    await mainUser.save()
-
-    // Update settings with store info
-    const settings = await models.Settings.findOne()
-    if (settings) {
-      settings.general.storeName = storeName.trim()
-      settings.general.logo = logo || ""
-      settings.general.banner = banner || ""
-      await settings.save()
-    }
-
-    console.log(`✅ Store setup completed for: ${storeName} (${storeId})`)
-
-    // Construct URLs
-    const baseUrl = `${req.protocol}://${req.get("host")}`
+    await c.save()
 
     res.json({
-      message: "Store setup completed successfully",
-      tenantId: mainUser.tenantId,
-      storeId,
-      storeUrl: `${baseUrl}/api/${storeId.toLowerCase()}`,
-      adminUrl: `${baseUrl}/api/admin`,
-      storeInfo: tenantUser.storeInfo,
+      message: "Profile updated successfully",
+      customer: {
+        id: c._id,
+        name: c.name,
+        email: c.email,
+        phone: c.phone,
+        dateOfBirth: c.dateOfBirth,
+        gender: c.gender,
+        preferences: c.preferences,
+      },
     })
   } catch (error) {
-    console.error("❌ Store setup error:", error)
-    res.status(500).json({
-      error: "Store setup failed",
-      details: error.message,
-      code: "STORE_SETUP_ERROR",
-    })
+    console.error("❌ Update profile error:", error)
+    res.status(500).json({ error: "Failed to update profile", details: error.message, code: "PROFILE_UPDATE_ERROR" })
   }
 })
 
-// Get user status
-router.get("/user/status", async (req, res) => {
+router.put("/change-password", authenticateCustomer, async (req, res) => {
   try {
-    const authHeader = req.header("Authorization")
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      return res.status(401).json({
-        error: "Access denied. No token provided.",
-        code: "NO_TOKEN",
-      })
+    const { currentPassword, newPassword } = req.body
+    const c = req.customer
+
+    if (!currentPassword || !newPassword) {
+      return res
+        .status(400)
+        .json({ error: "Current password and new password are required", code: "MISSING_PASSWORDS" })
     }
 
-    const token = authHeader.replace("Bearer ", "")
-    let decoded
-
-    try {
-      decoded = AuthUtils.verifyToken(token)
-    } catch (tokenError) {
-      return res.status(401).json({
-        error: "Invalid or expired token",
-        code: "INVALID_TOKEN",
-      })
+    const pv = AuthUtils.validatePassword
+      ? AuthUtils.validatePassword(newPassword)
+      : { isValid: newPassword.length >= 6, errors: [] }
+    if (!pv.isValid) {
+      return res
+        .status(400)
+        .json({ error: "New password validation failed", details: pv.errors, code: "INVALID_NEW_PASSWORD" })
     }
 
-    console.log("🔍 Getting user status...")
+    const ok = await c.comparePassword(currentPassword)
+    if (!ok) return res.status(401).json({ error: "Current password is incorrect", code: "INCORRECT_CURRENT_PASSWORD" })
 
-    // Get main user for tenant lookup
-    const mainUser = await User.findOne({ email: decoded.email, isActive: true })
-    if (!mainUser) {
-      console.log("❌ Main user not found")
-      return res.status(404).json({
-        error: "User not found",
-        code: "USER_NOT_FOUND",
-      })
-    }
-
-    console.log("✅ Main user found:", { tenantId: mainUser.tenantId, storeId: mainUser.storeId })
-
-    // Get tenant user data
-    const models = await getTenantModels(mainUser.tenantId)
-    const tenantUser = await models.User.findById(decoded.userId)
-
-    if (!tenantUser) {
-      console.log("❌ Tenant user not found")
-      return res.status(404).json({
-        error: "Tenant user not found",
-        code: "TENANT_USER_NOT_FOUND",
-      })
-    }
-
-    console.log("✅ Tenant user found:", { hasStore: tenantUser.hasStore })
+    c.password = newPassword
+    c.passwordChangedAt = new Date()
+    await c.save()
 
     res.json({
-      user: AuthUtils.sanitizeUser(tenantUser),
-      hasStore: tenantUser.hasStore,
-      tenantId: mainUser.tenantId,
-      storeId: mainUser.storeId || null,
-      tokenExpiry: AuthUtils.getTokenExpiry(token),
-      isTokenExpired: AuthUtils.isTokenExpired(token),
+      message: "Password changed successfully. Please login again with your new password.",
+      action: "LOGIN_REQUIRED",
     })
   } catch (error) {
-    console.error("❌ User status error:", error)
-    res.status(500).json({
-      error: "Failed to get user status",
-      details: error.message,
-      code: "USER_STATUS_ERROR",
-    })
+    console.error("❌ Change password error:", error)
+    res.status(500).json({ error: "Failed to change password", details: error.message, code: "PASSWORD_CHANGE_ERROR" })
   }
 })
 
-// Refresh token endpoint
-router.post("/refresh-token", async (req, res) => {
+router.get("/verify-token", authenticateCustomer, async (req, res) => {
   try {
-    const { refreshToken } = req.body
-
-    if (!refreshToken) {
-      return res.status(401).json({
-        error: "Refresh token is required",
-        code: "NO_REFRESH_TOKEN",
-      })
-    }
-
-    // In a production app, you'd validate the refresh token against a database
-    // For now, we'll just verify if it's a valid JWT and not expired
-    let decoded
-    try {
-      decoded = AuthUtils.verifyToken(refreshToken)
-    } catch (tokenError) {
-      return res.status(401).json({
-        error: "Invalid refresh token",
-        code: "INVALID_REFRESH_TOKEN",
-      })
-    }
-
-    // Get user and generate new token
-    const mainUser = await User.findOne({ email: decoded.email, isActive: true })
-    if (!mainUser) {
-      return res.status(404).json({
-        error: "User not found",
-        code: "USER_NOT_FOUND",
-      })
-    }
-
-    const newToken = AuthUtils.generateToken({
-      userId: decoded.userId,
-      tenantId: mainUser.tenantId,
-      email: decoded.email,
-      type: decoded.type,
-    })
-
+    const c = req.customer
+    const tokenInfo = AuthUtils.formatTokenExpiry ? AuthUtils.formatTokenExpiry(req.authToken) : undefined
     res.json({
-      message: "Token refreshed successfully",
-      token: newToken,
-      tokenExpiry: AuthUtils.getTokenExpiry(newToken),
+      valid: true,
+      customer: {
+        id: c._id,
+        name: c.name,
+        email: c.email,
+        phone: c.phone,
+        totalSpent: c.totalSpent,
+        totalOrders: c.totalOrders,
+        tier: c.tier,
+      },
+      tokenInfo,
     })
   } catch (error) {
-    console.error("❌ Token refresh error:", error)
-    res.status(500).json({
-      error: "Token refresh failed",
-      details: error.message,
-      code: "TOKEN_REFRESH_ERROR",
-    })
+    console.error("❌ Token verification error:", error)
+    res
+      .status(500)
+      .json({ error: "Token verification failed", details: error.message, code: "TOKEN_VERIFICATION_ERROR" })
   }
 })
 
-// Logout endpoint (for token invalidation tracking)
-router.post("/logout", async (req, res) => {
+router.post("/logout", authenticateCustomer, async (req, res) => {
   try {
-    const authHeader = req.header("Authorization")
-    if (authHeader && authHeader.startsWith("Bearer ")) {
-      const token = authHeader.replace("Bearer ", "")
-      // In a production app, you'd add this token to a blacklist
-      console.log(`🚪 User logged out, token should be blacklisted: ${token.substring(0, 20)}...`)
-    }
-
-    res.json({
-      message: "Logged out successfully",
-      action: "Please remove the token from your client storage",
-    })
+    console.log(`🚪 Customer logged out: ${req.customer.email || req.customer.phone}`)
+    res.json({ message: "Logged out successfully", action: "Please remove the token from your client storage" })
   } catch (error) {
     console.error("❌ Logout error:", error)
-    res.status(500).json({
-      error: "Logout failed",
-      details: error.message,
-      code: "LOGOUT_ERROR",
+    res.status(500).json({ error: "Failed to logout", details: error.message, code: "LOGOUT_ERROR" })
+  }
+})
+
+// Addresses
+router.get("/addresses", authenticateCustomer, async (req, res) => {
+  try {
+    const c = req.customer
+    res.json({
+      message: "Addresses retrieved successfully",
+      addresses: c.addresses || [],
+      count: c.addresses ? c.addresses.length : 0,
     })
+  } catch (error) {
+    console.error("❌ Get addresses error:", error)
+    res.status(500).json({ error: "Failed to get addresses", details: error.message, code: "GET_ADDRESSES_ERROR" })
+  }
+})
+
+router.post("/addresses", authenticateCustomer, async (req, res) => {
+  try {
+    const { type, name, phone, street, city, state, zipCode, country, isDefault } = req.body
+    const c = req.customer
+
+    if (!name || !street || !city || !state || !zipCode) {
+      return res
+        .status(400)
+        .json({ error: "Name, street, city, state, and zip code are required", code: "MISSING_ADDRESS_FIELDS" })
+    }
+    if (!/^\d{5,6}$/.test(String(zipCode))) {
+      return res.status(400).json({ error: "Zip code must be 5-6 digits", code: "INVALID_ZIP_CODE" })
+    }
+
+    const addressData = {
+      type: type || "home",
+      name: name.trim(),
+      phone: phone || c.phone || "",
+      street: street.trim(),
+      city: city.trim(),
+      state: state.trim(),
+      zipCode: String(zipCode).trim(),
+      country: country || "India",
+      isDefault: !!isDefault,
+    }
+
+    await c.addAddress(addressData)
+    const newAddress = c.addresses[c.addresses.length - 1]
+    res.status(201).json({ message: "Address added successfully", address: newAddress, count: c.addresses.length })
+  } catch (error) {
+    console.error("❌ Add address error:", error)
+    res.status(500).json({ error: "Failed to add address", details: error.message, code: "ADD_ADDRESS_ERROR" })
+  }
+})
+
+router.put("/addresses/:addressId", authenticateCustomer, async (req, res) => {
+  try {
+    const { addressId } = req.params
+    const { type, name, phone, street, city, state, zipCode, country, isDefault } = req.body
+    const c = req.customer
+
+    if (!name || !street || !city || !state || !zipCode) {
+      return res
+        .status(400)
+        .json({ error: "Name, street, city, state, and zip code are required", code: "MISSING_ADDRESS_FIELDS" })
+    }
+    if (!/^\d{5,6}$/.test(String(zipCode))) {
+      return res.status(400).json({ error: "Zip code must be 5-6 digits", code: "INVALID_ZIP_CODE" })
+    }
+
+    const updateData = {
+      type: type || "home",
+      name: name.trim(),
+      phone: phone || c.phone || "",
+      street: street.trim(),
+      city: city.trim(),
+      state: state.trim(),
+      zipCode: String(zipCode).trim(),
+      country: country || "India",
+      isDefault: !!isDefault,
+    }
+
+    const ok = await c.updateAddress(addressId, updateData)
+    if (!ok) return res.status(404).json({ error: "Address not found", code: "ADDRESS_NOT_FOUND" })
+
+    const updatedAddress = c.addresses.id(addressId)
+    res.json({ message: "Address updated successfully", address: updatedAddress })
+  } catch (error) {
+    console.error("❌ Update address error:", error)
+    res.status(500).json({ error: "Failed to update address", details: error.message, code: "UPDATE_ADDRESS_ERROR" })
+  }
+})
+
+router.delete("/addresses/:addressId", authenticateCustomer, async (req, res) => {
+  try {
+    const { addressId } = req.params
+    const c = req.customer
+
+    if (c.addresses.length <= 1) {
+      return res.status(400).json({
+        error: "Cannot delete the only address. Please add another address first.",
+        code: "CANNOT_DELETE_ONLY_ADDRESS",
+      })
+    }
+
+    const ok = await c.removeAddress(addressId)
+    if (!ok) return res.status(404).json({ error: "Address not found", code: "ADDRESS_NOT_FOUND" })
+
+    res.json({ message: "Address deleted successfully", count: c.addresses.length })
+  } catch (error) {
+    console.error("❌ Delete address error:", error)
+    res.status(500).json({ error: "Failed to delete address", details: error.message, code: "DELETE_ADDRESS_ERROR" })
   }
 })
 

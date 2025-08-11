@@ -74,28 +74,49 @@ router.post("/otp/request", async (req, res) => {
       return res.status(500).json({ error: "Store context not initialized", code: "STORE_CONTEXT_ERROR" })
     }
 
-    if (!hasMsg91()) {
-      // Dev-mode: log a generated OTP
-      const devOtp = ("" + Math.floor(100000 + Math.random() * 900000)).padStart(6, "0")
-      console.log(`🧪 DEV OTP for ${phone}: ${devOtp}`)
+    const firebaseStatus = getFirebaseStatus()
+
+    if (firebaseStatus === "enabled") {
+      // Return Firebase config for client-side OTP handling
+      const cfg = getFirebaseClientConfig()
+      if (!cfg.apiKey || !cfg.authDomain || !cfg.projectId) {
+        return res.status(500).json({
+          error: "Firebase web config is not properly configured",
+          code: "FIREBASE_CONFIG_MISSING",
+        })
+      }
+
       return res.json({
-        message: "DEV MODE: OTP generated (check server logs)",
-        provider: "development",
+        message: "Use Firebase for OTP verification",
+        provider: "firebase",
         purpose,
-        dev: { code: devOtp },
+        config: cfg,
         expiresIn: "10 minutes",
       })
     }
 
-    const storeName = req.storeInfo?.name || "Store"
-    const result = await startMsg91Otp(phone, "sms", { purpose, storeName })
+    if (hasMsg91()) {
+      const storeName = req.storeInfo?.name || "Store"
+      const result = await startMsg91Otp(phone, "sms", { purpose, storeName })
 
+      return res.json({
+        message: "OTP sent via MSG91 (fallback)",
+        provider: "msg91",
+        purpose,
+        expiresIn: "10 minutes",
+        details: result.data,
+      })
+    }
+
+    // Dev-mode: log a generated OTP
+    const devOtp = ("" + Math.floor(100000 + Math.random() * 900000)).padStart(6, "0")
+    console.log(`🧪 DEV OTP for ${phone}: ${devOtp}`)
     return res.json({
-      message: "OTP sent via MSG91",
-      provider: "msg91",
+      message: "DEV MODE: OTP generated (check server logs)",
+      provider: "development",
       purpose,
+      dev: { code: devOtp },
       expiresIn: "10 minutes",
-      details: result.data,
     })
   } catch (error) {
     const details = error?.response?.data || error.message || String(error)

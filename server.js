@@ -11,14 +11,36 @@ const app = express()
 const PORT = process.env.PORT || 5000
 
 const corsOptions = {
-  origin: true, // This allows all origins
-  credentials: true, // Allow cookies and authorization headers
+  origin: (origin, callback) => {
+    const defaultAllowed = [
+      "https://oneofwun.in",
+      "https://www.oneofwun.in",
+      "https://api.yespstudio.com",
+      "http://localhost:3000",
+      "http://localhost:5173",
+      "http://127.0.0.1:3000",
+      "http://127.0.0.1:5173",
+    ]
+    const extra = (process.env.CORS_EXTRA_ORIGINS || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+    const allowedOrigins = new Set([...defaultAllowed, ...extra])
+
+    const allowAll = process.env.CORS_ALLOW_ALL === "true"
+
+    // No origin for curl/postman or same-origin
+    if (!origin) return callback(null, true)
+    if (allowAll || allowedOrigins.has(origin)) return callback(null, true)
+    return callback(new Error(`Origin ${origin} not allowed by CORS`))
+  },
+  credentials: true,
   methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
   allowedHeaders: ["Origin", "X-Requested-With", "Content-Type", "Accept", "Authorization", "Cache-Control", "Pragma"],
   exposedHeaders: ["Authorization"],
-  maxAge: 86400, // Cache preflight response for 24 hours
-  preflightContinue: false, // Ensure preflight requests are handled immediately
-  optionsSuccessStatus: 200, // Some legacy browsers choke on 204
+  maxAge: 86400,
+  preflightContinue: false,
+  optionsSuccessStatus: 200,
 }
 
 // Middleware
@@ -26,8 +48,26 @@ app.use(cors(corsOptions))
 
 app.use((req, res, next) => {
   const origin = req.get("origin")
-  if (origin) {
-    res.header("Access-Control-Allow-Origin", origin)
+  const defaultAllowed = [
+    "https://oneofwun.in",
+    "https://www.oneofwun.in",
+    "https://api.yespstudio.com",
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173",
+  ]
+  const extra = (process.env.CORS_EXTRA_ORIGINS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+  const allowedOrigins = new Set([...defaultAllowed, ...extra])
+  const allowAll = process.env.CORS_ALLOW_ALL === "true"
+
+  const resolvedOrigin = allowAll || (origin && allowedOrigins.has(origin)) ? origin : null
+
+  if (resolvedOrigin) {
+    res.header("Access-Control-Allow-Origin", resolvedOrigin)
     res.header("Vary", "Origin")
     res.header("Access-Control-Allow-Credentials", "true")
     res.header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,PATCH,OPTIONS")
@@ -35,32 +75,49 @@ app.use((req, res, next) => {
       "Access-Control-Allow-Headers",
       "Origin,X-Requested-With,Content-Type,Accept,Authorization,Cache-Control,Pragma",
     )
-  } else {
-    // Fallback for non-CORS requests
-    res.header("Access-Control-Allow-Origin", "*")
+    res.header("Access-Control-Expose-Headers", "Authorization")
   }
+
   next()
 })
 
 app.use((req, res, next) => {
   if (req.method === "OPTIONS") {
+    const origin = req.get("origin")
+    const defaultAllowed = [
+      "https://oneofwun.in",
+      "https://www.oneofwun.in",
+      "https://api.yespstudio.com",
+      "http://localhost:3000",
+      "http://localhost:5173",
+      "http://127.0.0.1:3000",
+      "http://127.0.0.1:5173",
+    ]
+    const extra = (process.env.CORS_EXTRA_ORIGINS || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+    const allowedOrigins = new Set([...defaultAllowed, ...extra])
+    const allowAll = process.env.CORS_ALLOW_ALL === "true"
+    const resolvedOrigin = allowAll || (origin && allowedOrigins.has(origin)) ? origin : null
+
     console.log(`🔍 Preflight request for: ${req.originalUrl}`)
-    console.log(`🔍 Origin: ${req.get("origin")}`)
+    console.log(`🔍 Origin: ${origin}`)
     console.log(`🔍 Access-Control-Request-Method: ${req.get("Access-Control-Request-Method")}`)
     console.log(`🔍 Access-Control-Request-Headers: ${req.get("Access-Control-Request-Headers")}`)
 
-    const origin = req.get("origin")
-
-    // Allow all origins
-    res.header("Access-Control-Allow-Origin", origin || "*")
-    res.header("Access-Control-Allow-Credentials", "true")
+    if (resolvedOrigin) {
+      res.header("Access-Control-Allow-Origin", resolvedOrigin)
+      res.header("Vary", "Origin")
+      res.header("Access-Control-Allow-Credentials", "true")
+    }
     res.header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,PATCH,OPTIONS")
     res.header(
       "Access-Control-Allow-Headers",
       "Origin,X-Requested-With,Content-Type,Accept,Authorization,Cache-Control,Pragma",
     )
     res.header("Access-Control-Max-Age", "86400")
-    console.log(`✅ Preflight approved for origin: ${origin || "any"}`)
+    console.log(`✅ Preflight approved for origin: ${resolvedOrigin || "not allowed"}`)
     return res.status(200).end()
   }
   next()

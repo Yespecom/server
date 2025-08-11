@@ -68,19 +68,24 @@ module.exports = (tenantDB) => {
         minlength: 2,
         maxlength: 100,
       },
+      // Email is optional to support phone-first customers.
       email: {
         type: String,
-        required: true,
+        required: false,
         unique: true,
+        sparse: true,
         lowercase: true,
         trim: true,
         validate: {
-          validator: AuthUtils.validateEmail,
+          validator: (email) => !email || AuthUtils.validateEmail(email),
           message: "Please enter a valid email address",
         },
       },
+      // Make phone unique and sparse to allow missing values and prevent duplicates.
       phone: {
         type: String,
+        unique: true,
+        sparse: true,
         trim: true,
         validate: {
           validator: (phone) => !phone || AuthUtils.validatePhone(phone),
@@ -92,7 +97,7 @@ module.exports = (tenantDB) => {
         minlength: 8,
         validate: {
           validator: (password) => {
-            if (!password) return true // Allow empty password for migration
+            if (!password) return true // Allow empty password for migration or phone-only users
             return AuthUtils.validatePassword(password).isValid
           },
           message: "Password must be at least 8 characters with uppercase, lowercase, number and special character",
@@ -185,6 +190,11 @@ module.exports = (tenantDB) => {
         type: String,
         maxlength: 500,
       },
+
+      // Optional email verification fields
+      pendingEmail: { type: String, lowercase: true, trim: true },
+      emailVerificationToken: { type: String },
+      emailVerificationExpires: { type: Date },
     },
     {
       timestamps: true,
@@ -193,9 +203,9 @@ module.exports = (tenantDB) => {
     },
   )
 
-  // Indexes for better performance
-  customerSchema.index({ email: 1 })
-  customerSchema.index({ phone: 1 })
+  // Indexes for better performance and uniqueness
+  customerSchema.index({ email: 1 }, { unique: true, sparse: true })
+  customerSchema.index({ phone: 1 }, { unique: true, sparse: true })
   customerSchema.index({ isActive: 1 })
   customerSchema.index({ totalSpent: -1 })
   customerSchema.index({ createdAt: -1 })
@@ -225,7 +235,7 @@ module.exports = (tenantDB) => {
       const salt = await bcrypt.genSalt(12)
       this.password = await bcrypt.hash(this.password, salt)
 
-      console.log(`🔐 Password hashed for customer: ${this.email}`)
+      console.log(`🔐 Password hashed for customer: ${this.email || this.phone}`)
       next()
     } catch (error) {
       console.error("❌ Password hashing error:", error)
@@ -260,12 +270,12 @@ module.exports = (tenantDB) => {
   customerSchema.methods.comparePassword = async function (candidatePassword) {
     try {
       if (!this.password) {
-        console.log(`❌ No password set for customer: ${this.email}`)
+        console.log(`❌ No password set for customer: ${this.email || this.phone}`)
         return false
       }
 
       const isMatch = await bcrypt.compare(candidatePassword, this.password)
-      console.log(`🔐 Password comparison for ${this.email}: ${isMatch ? "SUCCESS" : "FAILED"}`)
+      console.log(`🔐 Password comparison for ${this.email || this.phone}: ${isMatch ? "SUCCESS" : "FAILED"}`)
       return isMatch
     } catch (error) {
       console.error("❌ Password comparison error:", error)
@@ -288,10 +298,10 @@ module.exports = (tenantDB) => {
       }
 
       // Use longer expiration for remember me, otherwise use default long expiration
-      const expiresIn = rememberMe ? "365d" : "90d" // Increased default from 30d to 90d
+      const expiresIn = rememberMe ? "365d" : "90d"
       const token = AuthUtils.generateToken(payload, expiresIn)
 
-      console.log(`🎫 Auth token generated for customer: ${this.email} - Expires in: ${expiresIn}`)
+      console.log(`🎫 Auth token generated for customer: ${this.email || this.phone} - Expires in: ${expiresIn}`)
       return token
     } catch (error) {
       console.error("❌ Token generation error:", error)
@@ -369,7 +379,7 @@ module.exports = (tenantDB) => {
       await customer.save()
 
       // Generate token with longer expiration
-      const token = customer.generateAuthToken(storeId, tenantId, false) // 90 days by default
+      const token = customer.generateAuthToken(storeId, tenantId, false)
 
       console.log(`✅ Customer authentication successful: ${email}`)
 
@@ -403,7 +413,7 @@ module.exports = (tenantDB) => {
       this.addresses.push(addressData)
       await this.save()
 
-      console.log(`📍 Address added for customer: ${this.email}`)
+      console.log(`📍 Address added for customer: ${this.email || this.phone}`)
       return true
     } catch (error) {
       console.error("❌ Add address error:", error)
@@ -431,7 +441,7 @@ module.exports = (tenantDB) => {
       Object.assign(address, updateData)
       await this.save()
 
-      console.log(`📍 Address updated for customer: ${this.email}`)
+      console.log(`📍 Address updated for customer: ${this.email || this.phone}`)
       return true
     } catch (error) {
       console.error("❌ Update address error:", error)
@@ -457,7 +467,7 @@ module.exports = (tenantDB) => {
 
       await this.save()
 
-      console.log(`📍 Address removed for customer: ${this.email}`)
+      console.log(`📍 Address removed for customer: ${this.email || this.phone}`)
       return true
     } catch (error) {
       console.error("❌ Remove address error:", error)
@@ -499,13 +509,45 @@ module.exports = (tenantDB) => {
       await this.save()
 
       console.log(
-        `📊 Order stats updated for customer: ${this.email} - Amount: ₹${orderAmount}, Points: +${pointsEarned}`,
+        `📊 Order stats updated for customer: ${this.email || this.phone} - Amount: ₹${orderAmount}, Points: +${pointsEarned}`,
       )
       return { pointsEarned, newTier: this.tier }
     } catch (error) {
       console.error("❌ Update order stats error:", error)
       throw new Error("Failed to update order statistics")
     }
+  }
+
+  // Email verification helpers (optional)
+  customerSchema.methods.createEmailVerificationCode = function (newEmail, ttlMinutes = 10) {
+    if (!newEmail || !AuthUtils.validateEmail(newEmail)) {
+      throw new Error("Valid email is required for verification")
+    }
+    const code = ("" + Math.floor(100000 + Math.random() * 900000)).padStart(6, "0")
+    this.pendingEmail = newEmail.toLowerCase().trim()
+    this.emailVerificationToken = AuthUtils.hashForLogging(code)
+    this.emailVerificationExpires = new Date(Date.now() + ttlMinutes * 60 * 1000)
+    return code
+  }
+
+  customerSchema.methods.verifyEmailCodeAndApply = async function (code) {
+    if (!this.pendingEmail || !this.emailVerificationToken || !this.emailVerificationExpires) {
+      return { success: false, error: "No email verification in progress", code: "NO_PENDING_VERIFICATION" }
+    }
+    if (this.emailVerificationExpires <= new Date()) {
+      return { success: false, error: "Verification code expired", code: "CODE_EXPIRED" }
+    }
+    const hashed = AuthUtils.hashForLogging(code)
+    if (hashed !== this.emailVerificationToken) {
+      return { success: false, error: "Invalid verification code", code: "INVALID_CODE" }
+    }
+    this.email = this.pendingEmail
+    this.emailVerified = true
+    this.pendingEmail = undefined
+    this.emailVerificationToken = undefined
+    this.emailVerificationExpires = undefined
+    await this.save()
+    return { success: true }
   }
 
   return tenantDB.model("Customer", customerSchema)

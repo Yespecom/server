@@ -42,6 +42,7 @@ const adminRoutes = require("./routes/admin")
 const storeRoutes = require("./routes/store")
 const otpRoutes = require("./routes/otp")
 const passwordResetRoutes = require("./routes/password-reset")
+app.use("/api/recaptcha", require("./routes/recaptcha"))
 
 // Import middleware
 const authMiddleware = require("./middleware/auth")

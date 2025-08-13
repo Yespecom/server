@@ -4,6 +4,7 @@ const bcrypt = require("bcryptjs")
 const rateLimit = require("express-rate-limit")
 const AuthUtils = require("../../utils/auth")
 const router = express.Router({ mergeParams: true })
+const { recaptchaMiddleware } = require("../../middleware/recaptcha")
 
 // Apply rate limiting to authentication endpoints
 const authRateLimit = rateLimit({
@@ -40,12 +41,22 @@ router.get("/test", (req, res) => {
   })
 })
 
-// Enhanced customer registration with longer token expiration
-router.post("/register", async (req, res) => {
+// Enhanced customer registration with reCAPTCHA and longer token expiration
+router.post("/register", recaptchaMiddleware.v3.register, async (req, res) => {
   try {
     const { name, email, password, phone, acceptTerms, rememberMe } = req.body
 
     console.log(`📝 Customer registration for store: ${req.storeId}, email: ${email}`)
+
+    // Log reCAPTCHA result
+    if (req.recaptcha) {
+      console.log(`🔒 reCAPTCHA result:`, {
+        success: req.recaptcha.success,
+        score: req.recaptcha.score,
+        action: req.recaptcha.action,
+        skipped: req.recaptcha.skipped,
+      })
+    }
 
     // Enhanced validation
     const errors = []
@@ -180,13 +191,23 @@ router.post("/register", async (req, res) => {
   }
 })
 
-// Enhanced customer login with longer token expiration
-router.post("/login", async (req, res) => {
+// Enhanced customer login with reCAPTCHA and longer token expiration
+router.post("/login", recaptchaMiddleware.v3.login, async (req, res) => {
   try {
     const { email, password, rememberMe } = req.body
 
     console.log(`🔐 Customer login attempt for store: ${req.storeId}`)
     console.log(`🔐 Email: ${email}, Remember Me: ${rememberMe}`)
+
+    // Log reCAPTCHA result
+    if (req.recaptcha) {
+      console.log(`🔒 reCAPTCHA result:`, {
+        success: req.recaptcha.success,
+        score: req.recaptcha.score,
+        action: req.recaptcha.action,
+        skipped: req.recaptcha.skipped,
+      })
+    }
 
     // Validation
     if (!email || !password) {
@@ -858,10 +879,20 @@ router.delete("/addresses/:addressId", authenticateCustomer, async (req, res) =>
   }
 })
 
-// Forgot password (initiate)
-router.post("/forgot-password", async (req, res) => {
+// Forgot password (initiate) - with reCAPTCHA
+router.post("/forgot-password", recaptchaMiddleware.v3.forgotPassword, async (req, res) => {
   try {
     const { email } = req.body
+
+    // Log reCAPTCHA result
+    if (req.recaptcha) {
+      console.log(`🔒 reCAPTCHA result:`, {
+        success: req.recaptcha.success,
+        score: req.recaptcha.score,
+        action: req.recaptcha.action,
+        skipped: req.recaptcha.skipped,
+      })
+    }
 
     if (!email || !AuthUtils.validateEmail(email)) {
       return res.status(400).json({
@@ -902,10 +933,20 @@ router.post("/forgot-password", async (req, res) => {
   }
 })
 
-// Reset password
-router.post("/reset-password", async (req, res) => {
+// Reset password - with reCAPTCHA
+router.post("/reset-password", recaptchaMiddleware.v3.resetPassword, async (req, res) => {
   try {
     const { token, newPassword } = req.body
+
+    // Log reCAPTCHA result
+    if (req.recaptcha) {
+      console.log(`🔒 reCAPTCHA result:`, {
+        success: req.recaptcha.success,
+        score: req.recaptcha.score,
+        action: req.recaptcha.action,
+        skipped: req.recaptcha.skipped,
+      })
+    }
 
     if (!token || !newPassword) {
       return res.status(400).json({
